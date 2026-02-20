@@ -1,0 +1,6 @@
+.venv/
+.pycache/
+__pycache__/
+.env
+*.log
+bot_data.sqlite3
