@@ -386,6 +386,17 @@ class Storage:
                     (chat_id, limit),
                 ).fetchall()
 
+    def list_all_lessons_for_view(self) -> List[sqlite3.Row]:
+        with self._lock:
+            with self._connect() as conn:
+                return conn.execute(
+                    """
+                    SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded
+                    FROM lessons
+                    ORDER BY lesson_dt ASC
+                    """
+                ).fetchall()
+
     def list_recent_reports(self, chat_id: Optional[int] = None, limit: int = 100) -> List[sqlite3.Row]:
         with self._lock:
             with self._connect() as conn:

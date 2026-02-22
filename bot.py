@@ -215,7 +215,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     register_chat_from_update(update)
-    lessons = storage.list_recent_lessons(chat_id=None, limit=300)
+    lessons = storage.list_all_lessons_for_view()
     reports = storage.list_recent_reports(chat_id=None, limit=100)
     total_uah = storage.total_payment_uah(chat_id=None)
     totals_by_school_rows = storage.total_payment_uah_by_school(chat_id=None)
