@@ -41,6 +41,7 @@ class Storage:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
@@ -312,23 +313,92 @@ class Storage:
                 conn.commit()
                 return int(cur.lastrowid)
 
-    def list_recent_lessons(self, chat_id: int, limit: int = 10) -> List[sqlite3.Row]:
+    def get_lesson_by_id(self, lesson_id: int) -> Optional[sqlite3.Row]:
         with self._lock:
             with self._connect() as conn:
                 return conn.execute(
                     """
-                    SELECT school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded
+                    SELECT id, school, student_name, lesson_dt, lesson_end_dt
+                    FROM lessons
+                    WHERE id = ?
+                    """,
+                    (lesson_id,),
+                ).fetchone()
+
+    def update_lesson(
+        self,
+        lesson_id: int,
+        school: str,
+        student_name: str,
+        lesson_start_dt: datetime,
+        lesson_end_dt: datetime,
+        reminder_start_dt: datetime,
+        reminder_end_dt: datetime,
+    ) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE lessons
+                    SET school = ?,
+                        student_name = ?,
+                        lesson_dt = ?,
+                        lesson_end_dt = ?,
+                        reminder_dt = ?,
+                        end_reminder_dt = ?,
+                        reminded = 0,
+                        end_reminded = 0
+                    WHERE id = ?
+                    """,
+                    (
+                        school,
+                        student_name,
+                        lesson_start_dt.isoformat(timespec="seconds"),
+                        lesson_end_dt.isoformat(timespec="seconds"),
+                        reminder_start_dt.isoformat(timespec="seconds"),
+                        reminder_end_dt.isoformat(timespec="seconds"),
+                        lesson_id,
+                    ),
+                )
+                conn.commit()
+
+    def list_recent_lessons(self, chat_id: Optional[int] = None, limit: int = 200) -> List[sqlite3.Row]:
+        with self._lock:
+            with self._connect() as conn:
+                if chat_id is None:
+                    return conn.execute(
+                        """
+                        SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded
+                        FROM lessons
+                        ORDER BY lesson_dt ASC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                return conn.execute(
+                    """
+                    SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded
                     FROM lessons
                     WHERE chat_id = ?
-                    ORDER BY lesson_dt DESC
+                    ORDER BY lesson_dt ASC
                     LIMIT ?
                     """,
                     (chat_id, limit),
                 ).fetchall()
 
-    def list_recent_reports(self, chat_id: int, limit: int = 10) -> List[sqlite3.Row]:
+    def list_recent_reports(self, chat_id: Optional[int] = None, limit: int = 100) -> List[sqlite3.Row]:
         with self._lock:
             with self._connect() as conn:
+                if chat_id is None:
+                    return conn.execute(
+                        """
+                        SELECT full_name, school, payment, payment_uah, created_at
+                        FROM lesson_reports
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
                 return conn.execute(
                     """
                     SELECT full_name, school, payment, payment_uah, created_at
@@ -340,18 +410,31 @@ class Storage:
                     (chat_id, limit),
                 ).fetchall()
 
-    def total_payment_uah(self, chat_id: int) -> float:
+    def total_payment_uah(self, chat_id: Optional[int] = None) -> float:
         with self._lock:
             with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT COALESCE(SUM(payment_uah), 0) AS total FROM lesson_reports WHERE chat_id = ?",
-                    (chat_id,),
-                ).fetchone()
+                if chat_id is None:
+                    row = conn.execute(
+                        "SELECT COALESCE(SUM(payment_uah), 0) AS total FROM lesson_reports"
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT COALESCE(SUM(payment_uah), 0) AS total FROM lesson_reports WHERE chat_id = ?",
+                        (chat_id,),
+                    ).fetchone()
         return float(row["total"]) if row else 0.0
 
-    def total_payment_uah_by_school(self, chat_id: int) -> List[sqlite3.Row]:
+    def total_payment_uah_by_school(self, chat_id: Optional[int] = None) -> List[sqlite3.Row]:
         with self._lock:
             with self._connect() as conn:
+                if chat_id is None:
+                    return conn.execute(
+                        """
+                        SELECT school, COALESCE(SUM(payment_uah), 0) AS total
+                        FROM lesson_reports
+                        GROUP BY school
+                        """
+                    ).fetchall()
                 return conn.execute(
                     """
                     SELECT school, COALESCE(SUM(payment_uah), 0) AS total
@@ -364,12 +447,26 @@ class Storage:
 
     def list_lessons_between(
         self,
-        chat_id: int,
+        chat_id: Optional[int],
         start_dt: datetime,
         end_dt: datetime,
     ) -> List[sqlite3.Row]:
         with self._lock:
             with self._connect() as conn:
+                if chat_id is None:
+                    return conn.execute(
+                        """
+                        SELECT school, student_name, lesson_dt, lesson_end_dt
+                        FROM lessons
+                        WHERE lesson_dt >= ?
+                          AND lesson_dt < ?
+                        ORDER BY lesson_dt ASC
+                        """,
+                        (
+                            start_dt.isoformat(timespec="seconds"),
+                            end_dt.isoformat(timespec="seconds"),
+                        ),
+                    ).fetchall()
                 return conn.execute(
                     """
                     SELECT school, student_name, lesson_dt, lesson_end_dt
@@ -420,10 +517,36 @@ class Storage:
                     conn.commit()
                 return row
 
-    def delete_all_for_chat(self, chat_id: int) -> None:
+    def consume_all_open_pending_report_notifications(self) -> List[sqlite3.Row]:
         with self._lock:
             with self._connect() as conn:
-                conn.execute("DELETE FROM lessons WHERE chat_id = ?", (chat_id,))
-                conn.execute("DELETE FROM lesson_reports WHERE chat_id = ?", (chat_id,))
-                conn.execute("DELETE FROM pending_report_notifications WHERE chat_id = ?", (chat_id,))
+                rows = conn.execute(
+                    """
+                    SELECT id, chat_id, message_id
+                    FROM pending_report_notifications
+                    WHERE is_open = 1
+                    ORDER BY created_at DESC
+                    """
+                ).fetchall()
+                if rows:
+                    ids = [int(row["id"]) for row in rows]
+                    placeholders = ",".join(["?"] * len(ids))
+                    conn.execute(
+                        f"UPDATE pending_report_notifications SET is_open = 0 WHERE id IN ({placeholders})",
+                        tuple(ids),
+                    )
+                    conn.commit()
+                return rows
+
+    def delete_all_for_chat(self, chat_id: Optional[int] = None) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                if chat_id is None:
+                    conn.execute("DELETE FROM lessons")
+                    conn.execute("DELETE FROM lesson_reports")
+                    conn.execute("DELETE FROM pending_report_notifications")
+                else:
+                    conn.execute("DELETE FROM lessons WHERE chat_id = ?", (chat_id,))
+                    conn.execute("DELETE FROM lesson_reports WHERE chat_id = ?", (chat_id,))
+                    conn.execute("DELETE FROM pending_report_notifications WHERE chat_id = ?", (chat_id,))
                 conn.commit()

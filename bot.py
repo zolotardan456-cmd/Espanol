@@ -4,7 +4,7 @@ import calendar
 import re
 from html import escape
 from datetime import datetime, timedelta, time as dt_time
-from typing import Optional
+from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -38,6 +38,15 @@ BTN_REPORT = "Отчет о уроке"
 BTN_ALL = "Все записи"
 BTN_DELETE_ALL = "Удалить все записи"
 BTN_BACK = "Назад"
+WEEKDAYS_RU = [
+    "Понедельник",
+    "Вторник",
+    "Среда",
+    "Четверг",
+    "Пятница",
+    "Суббота",
+    "Воскресенье",
+]
 SCHOOLS = [
     "Yarko",
     "Uknow",
@@ -52,10 +61,11 @@ SCHOOLS = [
     LESSON_MINUTE,
     LESSON_END_HOUR,
     LESSON_END_MINUTE,
+    EDIT_LESSON_PAYLOAD,
     REPORT_NAME,
     REPORT_SCHOOL,
     REPORT_PAYMENT,
-) = range(10)
+) = range(11)
 
 storage = Storage(os.getenv("DB_PATH", "bot_data.sqlite3"))
 
@@ -95,6 +105,83 @@ def register_chat_from_update(update: Update) -> None:
     storage.upsert_chat(int(chat.id), teacher_name_from_update(update))
 
 
+def get_registered_chat_ids(fallback_chat_id: Optional[int] = None) -> List[int]:
+    ids = [int(row["chat_id"]) for row in storage.list_chats()]
+    if fallback_chat_id is not None and fallback_chat_id not in ids:
+        ids.append(fallback_chat_id)
+    return ids
+
+
+def lesson_edit_keyboard(lessons: list) -> InlineKeyboardMarkup:
+    rows = []
+    for row in lessons[:30]:
+        lesson_id = int(row["id"])
+        start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"✏️ {row['student_name']} {start_dt.strftime('%d.%m %H:%M')}",
+                    callback_data=f"edit_lesson:{lesson_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows) if rows else InlineKeyboardMarkup([])
+
+
+def build_grouped_lessons_text(lessons: list) -> str:
+    if not lessons:
+        return "Уроки: нет записей"
+
+    grouped = {}
+    for row in lessons:
+        start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
+        end_raw = row["lesson_end_dt"]
+        if end_raw:
+            end_dt = datetime.fromisoformat(str(end_raw))
+        else:
+            end_dt = start_dt + timedelta(hours=1)
+
+        day_key = start_dt.date()
+        grouped.setdefault(day_key, {})
+        grouped[day_key].setdefault(str(row["school"]), [])
+        grouped[day_key][str(row["school"])].append(
+            {
+                "student_name": str(row["student_name"]),
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+            }
+        )
+
+    lines = []
+    for day in sorted(grouped.keys()):
+        lines.append(f"{day.day}, {WEEKDAYS_RU[day.weekday()]}")
+        lines.append("")
+
+        day_schools = grouped[day]
+        school_order = [s for s in SCHOOLS if s in day_schools] + [s for s in sorted(day_schools) if s not in SCHOOLS]
+        for school in school_order:
+            lines.append(school)
+            for lesson in day_schools[school]:
+                lines.append(
+                    f"{lesson['student_name']} {lesson['start_dt'].strftime('%H:%M')} - {lesson['end_dt'].strftime('%H:%M')}"
+                )
+            lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    chat_id = data.get("chat_id")
+    message_id = data.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        await context.bot.delete_message(chat_id=int(chat_id), message_id=int(message_id))
+    except Exception:
+        pass
+
+
 def format_uah(amount: float) -> str:
     if float(amount).is_integer():
         return f"{int(amount)} грн"
@@ -128,36 +215,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     register_chat_from_update(update)
-    chat_id = update.effective_chat.id
-    lessons = storage.list_recent_lessons(chat_id)
-    reports = storage.list_recent_reports(chat_id)
-    total_uah = storage.total_payment_uah(chat_id)
-    totals_by_school_rows = storage.total_payment_uah_by_school(chat_id)
+    lessons = storage.list_recent_lessons(chat_id=None, limit=300)
+    reports = storage.list_recent_reports(chat_id=None, limit=100)
+    total_uah = storage.total_payment_uah(chat_id=None)
+    totals_by_school_rows = storage.total_payment_uah_by_school(chat_id=None)
     totals_by_school = {str(row["school"]): float(row["total"]) for row in totals_by_school_rows}
 
-    lines = ["Последние данные:"]
-
-    if lessons:
-        lines.append("\nУроки:")
-        for row in lessons:
-            lesson_start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
-            lesson_end_raw = row["lesson_end_dt"]
-            if lesson_end_raw:
-                lesson_end_dt = datetime.fromisoformat(str(lesson_end_raw))
-            else:
-                lesson_end_dt = lesson_start_dt + timedelta(hours=1)
-            reminded = "да" if int(row["reminded"]) else "нет"
-            end_reminded = "да" if int(row["end_reminded"]) else "нет"
-            lines.append(
-                f"- {lesson_start_dt.strftime('%d.%m.%Y')} | {row['student_name']} | {row['school']} | "
-                f"с {lesson_start_dt.strftime('%H:%M')} до {lesson_end_dt.strftime('%H:%M')} | "
-                f"старт: {reminded}, конец: {end_reminded}"
-            )
-    else:
-        lines.append("\nУроки: нет записей")
+    lessons_text = build_grouped_lessons_text(lessons)
+    await update.message.reply_text(lessons_text, reply_markup=main_keyboard())
 
     if reports:
-        lines.append("\nОтчеты:")
+        lines = ["\nОтчеты:"]
         for row in reports:
             created_at = datetime.fromisoformat(str(row["created_at"])).strftime("%d.%m.%Y %H:%M")
             lines.append(
@@ -167,10 +235,15 @@ async def show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         for school in SCHOOLS:
             lines.append(f"- {school}: {format_uah(totals_by_school.get(school, 0.0))}")
         lines.append(f"\nИтого оплата: {format_uah(total_uah)}")
+        await update.message.reply_text("\n".join(lines), reply_markup=main_keyboard())
     else:
-        lines.append("\nОтчеты: нет записей")
+        await update.message.reply_text("Отчеты: нет записей", reply_markup=main_keyboard())
 
-    await update.message.reply_text("\n".join(lines), reply_markup=main_keyboard())
+    if lessons:
+        await update.message.reply_text(
+            "Выберите запись для редактирования:",
+            reply_markup=lesson_edit_keyboard(lessons),
+        )
 
 
 async def start_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -555,16 +628,16 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id
 
     storage.add_lesson_report(chat_id, full_name, school, payment, payment_uah)
-    pending_notification = storage.consume_latest_pending_report_notification(chat_id)
-    if pending_notification:
+    pending_notifications = storage.consume_all_open_pending_report_notifications()
+    for notification in pending_notifications:
         try:
             await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=int(pending_notification["message_id"]),
+                chat_id=int(notification["chat_id"]),
+                message_id=int(notification["message_id"]),
             )
         except Exception:
             pass
-    total_uah = storage.total_payment_uah(chat_id)
+    total_uah = storage.total_payment_uah(chat_id=None)
 
     await update.message.reply_text(
         "Отчет сохранен:\n"
@@ -581,8 +654,7 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def delete_all_records(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
-    chat_id = update.effective_chat.id
-    storage.delete_all_for_chat(chat_id)
+    storage.delete_all_for_chat(chat_id=None)
     context.user_data.clear()
     await update.message.reply_text("Все записи удалены.", reply_markup=main_keyboard())
     return ConversationHandler.END
@@ -592,6 +664,102 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
     context.user_data.clear()
     await update.message.reply_text("Возврат в главное меню.", reply_markup=main_keyboard())
+    return ConversationHandler.END
+
+
+def parse_lesson_edit_payload(raw: str):
+    parts = [part.strip() for part in raw.split(";")]
+    if len(parts) != 5:
+        return None
+    student_name, school, date_str, start_str, end_str = parts
+    if school not in SCHOOLS:
+        return None
+    try:
+        lesson_date = datetime.strptime(date_str, "%d.%m.%Y").date()
+        start_time = datetime.strptime(start_str, "%H:%M").time()
+        end_time = datetime.strptime(end_str, "%H:%M").time()
+    except ValueError:
+        return None
+
+    start_dt = datetime.combine(lesson_date, start_time)
+    end_dt = datetime.combine(lesson_date, end_time)
+    if end_dt <= start_dt:
+        return None
+    return student_name, school, start_dt, end_dt
+
+
+async def start_edit_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    lesson_id = int(query.data.split(":")[1])
+    lesson = storage.get_lesson_by_id(lesson_id)
+    if not lesson:
+        await query.message.reply_text("Запись не найдена.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    start_dt = datetime.fromisoformat(str(lesson["lesson_dt"]))
+    end_dt = datetime.fromisoformat(str(lesson["lesson_end_dt"]))
+    context.user_data["edit_lesson_id"] = lesson_id
+
+    await query.message.reply_text(
+        "Редактирование записи.\n"
+        f"Текущие данные:\n"
+        f"Ученик: {lesson['student_name']}\n"
+        f"Школа: {lesson['school']}\n"
+        f"Дата: {start_dt.strftime('%d.%m.%Y')}\n"
+        f"Время: {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}\n\n"
+        "Отправьте новые данные одним сообщением в формате:\n"
+        "Имя; Школа; ДД.ММ.ГГГГ; ЧЧ:ММ; ЧЧ:ММ\n"
+        f"Пример: Иван; Yarko; {start_dt.strftime('%d.%m.%Y')}; 15:00; 16:00",
+        reply_markup=form_keyboard(),
+    )
+    return EDIT_LESSON_PAYLOAD
+
+
+async def edit_lesson_payload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    payload = parse_lesson_edit_payload(update.message.text.strip())
+    if payload is None:
+        await update.message.reply_text(
+            "Неверный формат.\n"
+            "Используйте:\n"
+            "Имя; Школа; ДД.ММ.ГГГГ; ЧЧ:ММ; ЧЧ:ММ\n"
+            "Школа должна быть: Yarko, Uknow или Shabadoo.",
+            reply_markup=form_keyboard(),
+        )
+        return EDIT_LESSON_PAYLOAD
+
+    lesson_id = context.user_data.get("edit_lesson_id")
+    if not lesson_id:
+        await update.message.reply_text("Запись для редактирования не найдена.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    student_name, school, start_dt, end_dt = payload
+    now = datetime.now()
+    reminder_start_dt = start_dt - timedelta(minutes=30)
+    if reminder_start_dt < now:
+        reminder_start_dt = now
+    reminder_end_dt = end_dt - timedelta(minutes=10)
+    if reminder_end_dt < now:
+        reminder_end_dt = now
+
+    storage.update_lesson(
+        lesson_id=int(lesson_id),
+        school=school,
+        student_name=student_name,
+        lesson_start_dt=start_dt,
+        lesson_end_dt=end_dt,
+        reminder_start_dt=reminder_start_dt,
+        reminder_end_dt=reminder_end_dt,
+    )
+
+    await update.message.reply_text(
+        "Запись обновлена.\n"
+        f"{school}\n"
+        f"{student_name} {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}",
+        reply_markup=main_keyboard(),
+    )
+    context.user_data.clear()
     return ConversationHandler.END
 
 
@@ -631,55 +799,76 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Урок: с {reminder.lesson_start_dt.strftime('%H:%M')} до {reminder.lesson_end_dt.strftime('%H:%M')}\n"
             f"Дата: {reminder.lesson_start_dt.strftime('%d.%m.%Y')}"
         )
-        try:
-            await context.bot.send_message(chat_id=reminder.chat_id, text=message, parse_mode="HTML")
+        sent_to_any = False
+        for chat_id in get_registered_chat_ids(reminder.chat_id):
+            try:
+                sent = await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
+                context.job_queue.run_once(
+                    delete_message_job,
+                    when=600,
+                    data={"chat_id": chat_id, "message_id": int(sent.message_id)},
+                )
+                sent_to_any = True
+            except Exception as exc:
+                logger.exception(
+                    "Не удалось отправить стартовое напоминание для lesson_id=%s chat_id=%s: %s",
+                    reminder.lesson_id,
+                    chat_id,
+                    exc,
+                )
+        if sent_to_any:
             storage.mark_start_reminded(reminder.lesson_id)
-        except Exception as exc:
-            logger.exception(
-                "Не удалось отправить стартовое напоминание для lesson_id=%s: %s",
-                reminder.lesson_id,
-                exc,
-            )
 
     end_reminders = storage.get_due_end_reminders(now)
     for reminder in end_reminders:
         message = f"{reminder.student_name}, урок подходит к концу. Осталось 10 минут."
-        try:
-            await context.bot.send_message(chat_id=reminder.chat_id, text=message)
+        sent_to_any = False
+        for chat_id in get_registered_chat_ids(reminder.chat_id):
+            try:
+                sent = await context.bot.send_message(chat_id=chat_id, text=message)
+                context.job_queue.run_once(
+                    delete_message_job,
+                    when=600,
+                    data={"chat_id": chat_id, "message_id": int(sent.message_id)},
+                )
+                sent_to_any = True
+            except Exception as exc:
+                logger.exception(
+                    "Не удалось отправить финальное напоминание для lesson_id=%s chat_id=%s: %s",
+                    reminder.lesson_id,
+                    chat_id,
+                    exc,
+                )
+        if sent_to_any:
             storage.mark_end_reminded(reminder.lesson_id)
-        except Exception as exc:
-            logger.exception(
-                "Не удалось отправить финальное напоминание для lesson_id=%s: %s",
-                reminder.lesson_id,
-                exc,
-            )
 
     post_actions = storage.get_due_post_lesson_actions(now)
     for action in post_actions:
-        try:
-            prompt = (
-                "<b>Заполните отчет</b>\n"
-                f"Урок завершен: {escape(action.student_name)}\n"
-                f"Школа: <b>{escape(action.school)}</b>\n"
-                f"Время: {action.lesson_start_dt.strftime('%H:%M')} - {action.lesson_end_dt.strftime('%H:%M')}"
-            )
-            sent = await context.bot.send_message(
-                chat_id=action.chat_id,
-                text=prompt,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Заполнить отчет", callback_data="open_report")]]
-                ),
-            )
-            storage.add_pending_report_notification(action.chat_id, int(sent.message_id))
-        except Exception as exc:
-            logger.exception(
-                "Не удалось отправить уведомление об отчете для lesson_id=%s: %s",
-                action.lesson_id,
-                exc,
-            )
-        finally:
-            storage.delete_lesson_by_id(action.lesson_id)
+        prompt = (
+            "<b>Заполните отчет</b>\n"
+            f"Урок завершен: {escape(action.student_name)}\n"
+            f"Школа: <b>{escape(action.school)}</b>\n"
+            f"Время: {action.lesson_start_dt.strftime('%H:%M')} - {action.lesson_end_dt.strftime('%H:%M')}"
+        )
+        for chat_id in get_registered_chat_ids(action.chat_id):
+            try:
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=prompt,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Заполнить отчет", callback_data="open_report")]]
+                    ),
+                )
+                storage.add_pending_report_notification(chat_id, int(sent.message_id))
+            except Exception as exc:
+                logger.exception(
+                    "Не удалось отправить уведомление об отчете для lesson_id=%s chat_id=%s: %s",
+                    action.lesson_id,
+                    chat_id,
+                    exc,
+                )
+        storage.delete_lesson_by_id(action.lesson_id)
 
 
 async def morning_summary_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -688,17 +877,16 @@ async def morning_summary_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
     day_end = day_start + timedelta(days=1)
 
     chats = storage.list_chats()
+    shared_lessons = storage.list_lessons_between(chat_id=None, start_dt=day_start, end_dt=day_end)
+    lesson_count = len(shared_lessons)
     for chat in chats:
         chat_id = int(chat["chat_id"])
         teacher_name = str(chat["teacher_name"]).strip() or "Анастасия"
-        lessons = storage.list_lessons_between(chat_id, day_start, day_end)
-        lesson_count = len(lessons)
-
         if lesson_count == 0:
             text = f"Доброе утро, {teacher_name}. На сегодня у вас 0 уроков."
         else:
             lines = [f"Доброе утро, {teacher_name}. На сегодня у вас {lesson_count} урока(ов):"]
-            for row in lessons:
+            for row in shared_lessons:
                 start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
                 end_raw = row["lesson_end_dt"]
                 if end_raw:
@@ -786,11 +974,26 @@ def build_app(token: str) -> Application:
         ],
     )
 
+    edit_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_edit_lesson, pattern=r"^edit_lesson:\d+$")],
+        states={
+            EDIT_LESSON_PAYLOAD: [
+                MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_lesson_payload),
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
+            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), delete_all_records),
+        ],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ALL}$"), show_all))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), delete_all_records))
     app.add_handler(lesson_conv)
     app.add_handler(report_conv)
+    app.add_handler(edit_conv)
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back))
     app.add_handler(MessageHandler(filters.COMMAND, reject_command))
     app.add_handler(
