@@ -37,6 +37,7 @@ BTN_LESSON = "Записать на урок"
 BTN_REPORT = "Отчет о уроке"
 BTN_ALL = "Все записи"
 BTN_DELETE_ALL = "Удалить все записи"
+BTN_EDIT = "Редактировать запись"
 BTN_BACK = "Назад"
 WEEKDAYS_RU = [
     "Понедельник",
@@ -61,7 +62,7 @@ SCHOOLS = [
     LESSON_MINUTE,
     LESSON_END_HOUR,
     LESSON_END_MINUTE,
-    EDIT_LESSON_PAYLOAD,
+    EDIT_SELECT,
     REPORT_NAME,
     REPORT_SCHOOL,
     REPORT_PAYMENT,
@@ -92,7 +93,7 @@ def get_app_timezone():
 
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[BTN_LESSON, BTN_REPORT], [BTN_ALL, BTN_DELETE_ALL]],
+        [[BTN_LESSON, BTN_REPORT], [BTN_ALL, BTN_EDIT], [BTN_DELETE_ALL]],
         resize_keyboard=True,
     )
 
@@ -254,15 +255,10 @@ async def show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text("Отчеты: нет записей", reply_markup=main_keyboard())
 
-    if lessons:
-        await update.message.reply_text(
-            "Выберите запись для редактирования:",
-            reply_markup=lesson_edit_keyboard(lessons),
-        )
-
 
 async def start_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
+    context.user_data.pop("edit_lesson_id", None)
     await update.message.reply_text(
         "В какой школе будет проходить урок?",
         reply_markup=school_keyboard("school"),
@@ -274,6 +270,38 @@ async def start_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def need_school_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "Выберите школу кнопкой ниже:",
+        reply_markup=school_keyboard("school"),
+    )
+    return LESSON_SCHOOL
+
+
+async def start_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    register_chat_from_update(update)
+    lessons = storage.list_all_lessons_for_view()
+    if not lessons:
+        await update.message.reply_text("Нет записей для редактирования.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Выберите запись, которую хотите перезаписать:",
+        reply_markup=lesson_edit_keyboard(lessons),
+    )
+    await update.message.reply_text("Нажмите «Назад», чтобы выйти.", reply_markup=form_keyboard())
+    return EDIT_SELECT
+
+
+async def pick_edit_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    lesson_id = int(query.data.split(":")[1])
+    lesson = storage.get_lesson_by_id(lesson_id)
+    if not lesson:
+        await query.message.reply_text("Запись не найдена.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    context.user_data["edit_lesson_id"] = lesson_id
+    await query.message.reply_text(
+        "Перезапишите урок по шагам.\nСначала выберите школу:",
         reply_markup=school_keyboard("school"),
     )
     return LESSON_SCHOOL
@@ -554,19 +582,33 @@ async def lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     school = context.user_data.get("lesson_school", "")
     student = context.user_data.get("lesson_student", "")
     chat_id = update.effective_chat.id
+    edit_lesson_id = context.user_data.get("edit_lesson_id")
 
-    storage.add_lesson(
-        chat_id=chat_id,
-        school=school,
-        student_name=student,
-        lesson_start_dt=lesson_start_dt,
-        reminder_start_dt=start_reminder_dt,
-        lesson_end_dt=lesson_end_dt,
-        reminder_end_dt=end_reminder_dt,
-    )
+    if edit_lesson_id:
+        storage.update_lesson(
+            lesson_id=int(edit_lesson_id),
+            school=school,
+            student_name=student,
+            lesson_start_dt=lesson_start_dt,
+            lesson_end_dt=lesson_end_dt,
+            reminder_start_dt=start_reminder_dt,
+            reminder_end_dt=end_reminder_dt,
+        )
+        header = "Запись обновлена."
+    else:
+        storage.add_lesson(
+            chat_id=chat_id,
+            school=school,
+            student_name=student,
+            lesson_start_dt=lesson_start_dt,
+            reminder_start_dt=start_reminder_dt,
+            lesson_end_dt=lesson_end_dt,
+            reminder_end_dt=end_reminder_dt,
+        )
+        header = "Запись сохранена."
 
     await query.edit_message_text(
-        "Запись сохранена.\n"
+        f"{header}\n"
         f"Школа: <b>{escape(school)}</b>\n"
         f"Ученик: {student}\n"
         f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
@@ -717,102 +759,6 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
     context.user_data.clear()
     await update.message.reply_text("Возврат в главное меню.", reply_markup=main_keyboard())
-    return ConversationHandler.END
-
-
-def parse_lesson_edit_payload(raw: str):
-    parts = [part.strip() for part in raw.split(";")]
-    if len(parts) != 5:
-        return None
-    student_name, school, date_str, start_str, end_str = parts
-    if school not in SCHOOLS:
-        return None
-    try:
-        lesson_date = datetime.strptime(date_str, "%d.%m.%Y").date()
-        start_time = datetime.strptime(start_str, "%H:%M").time()
-        end_time = datetime.strptime(end_str, "%H:%M").time()
-    except ValueError:
-        return None
-
-    start_dt = datetime.combine(lesson_date, start_time)
-    end_dt = datetime.combine(lesson_date, end_time)
-    if end_dt <= start_dt:
-        return None
-    return student_name, school, start_dt, end_dt
-
-
-async def start_edit_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    lesson_id = int(query.data.split(":")[1])
-    lesson = storage.get_lesson_by_id(lesson_id)
-    if not lesson:
-        await query.message.reply_text("Запись не найдена.", reply_markup=main_keyboard())
-        return ConversationHandler.END
-
-    start_dt = datetime.fromisoformat(str(lesson["lesson_dt"]))
-    end_dt = datetime.fromisoformat(str(lesson["lesson_end_dt"]))
-    context.user_data["edit_lesson_id"] = lesson_id
-
-    await query.message.reply_text(
-        "Редактирование записи.\n"
-        f"Текущие данные:\n"
-        f"Ученик: {lesson['student_name']}\n"
-        f"Школа: {lesson['school']}\n"
-        f"Дата: {start_dt.strftime('%d.%m.%Y')}\n"
-        f"Время: {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}\n\n"
-        "Отправьте новые данные одним сообщением в формате:\n"
-        "Имя; Школа; ДД.ММ.ГГГГ; ЧЧ:ММ; ЧЧ:ММ\n"
-        f"Пример: Иван; Yarko; {start_dt.strftime('%d.%m.%Y')}; 15:00; 16:00",
-        reply_markup=form_keyboard(),
-    )
-    return EDIT_LESSON_PAYLOAD
-
-
-async def edit_lesson_payload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    payload = parse_lesson_edit_payload(update.message.text.strip())
-    if payload is None:
-        await update.message.reply_text(
-            "Неверный формат.\n"
-            "Используйте:\n"
-            "Имя; Школа; ДД.ММ.ГГГГ; ЧЧ:ММ; ЧЧ:ММ\n"
-            "Школа должна быть: Yarko, Uknow или Shabadoo.",
-            reply_markup=form_keyboard(),
-        )
-        return EDIT_LESSON_PAYLOAD
-
-    lesson_id = context.user_data.get("edit_lesson_id")
-    if not lesson_id:
-        await update.message.reply_text("Запись для редактирования не найдена.", reply_markup=main_keyboard())
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    student_name, school, start_dt, end_dt = payload
-    now = datetime.now()
-    reminder_start_dt = start_dt - timedelta(minutes=30)
-    if reminder_start_dt < now:
-        reminder_start_dt = now
-    reminder_end_dt = end_dt - timedelta(minutes=10)
-    if reminder_end_dt < now:
-        reminder_end_dt = now
-
-    storage.update_lesson(
-        lesson_id=int(lesson_id),
-        school=school,
-        student_name=student_name,
-        lesson_start_dt=start_dt,
-        lesson_end_dt=end_dt,
-        reminder_start_dt=reminder_start_dt,
-        reminder_end_dt=reminder_end_dt,
-    )
-
-    await update.message.reply_text(
-        "Запись обновлена.\n"
-        f"{school}\n"
-        f"{student_name} {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}",
-        reply_markup=main_keyboard(),
-    )
-    context.user_data.clear()
     return ConversationHandler.END
 
 
@@ -992,7 +938,10 @@ def build_app(token: str) -> Application:
     )
 
     lesson_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(f"^{BTN_LESSON}$"), start_lesson)],
+        entry_points=[
+            MessageHandler(filters.Regex(f"^{BTN_LESSON}$"), start_lesson),
+            MessageHandler(filters.Regex(f"^{BTN_EDIT}$"), start_edit_menu),
+        ],
         states={
             LESSON_SCHOOL: [
                 CallbackQueryHandler(lesson_school, pattern=r"^school:\d+$"),
@@ -1015,6 +964,9 @@ def build_app(token: str) -> Application:
             ],
             LESSON_END_MINUTE: [
                 CallbackQueryHandler(lesson_end_minute, pattern=r"^timem:(\d+|back)$"),
+            ],
+            EDIT_SELECT: [
+                CallbackQueryHandler(pick_edit_lesson, pattern=r"^edit_lesson:\d+$"),
             ],
         },
         fallbacks=[
@@ -1047,26 +999,11 @@ def build_app(token: str) -> Application:
         ],
     )
 
-    edit_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_edit_lesson, pattern=r"^edit_lesson:\d+$")],
-        states={
-            EDIT_LESSON_PAYLOAD: [
-                MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_lesson_payload),
-            ],
-        },
-        fallbacks=[
-            MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
-            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation),
-        ],
-    )
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ALL}$"), show_all))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation))
     app.add_handler(lesson_conv)
     app.add_handler(report_conv)
-    app.add_handler(edit_conv)
     app.add_handler(CallbackQueryHandler(confirm_delete_all, pattern=r"^delete_all:confirm$"))
     app.add_handler(CallbackQueryHandler(cancel_delete_all, pattern=r"^delete_all:cancel$"))
     app.add_handler(CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"))
