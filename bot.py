@@ -67,7 +67,17 @@ SCHOOLS = [
     REPORT_PAYMENT,
 ) = range(11)
 
-storage = Storage(os.getenv("DB_PATH", "bot_data.sqlite3"))
+
+def resolve_db_path() -> str:
+    explicit = os.getenv("DB_PATH")
+    if explicit:
+        return explicit
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return "/data/bot_data.sqlite3"
+    return "bot_data.sqlite3"
+
+
+storage = Storage(resolve_db_path())
 
 
 def get_app_timezone():
@@ -149,6 +159,7 @@ def build_grouped_lessons_text(lessons: list) -> str:
                 "student_name": str(row["student_name"]),
                 "start_dt": start_dt,
                 "end_dt": end_dt,
+                "is_confirmed": bool(int(row["is_confirmed"])) if "is_confirmed" in row.keys() else False,
             }
         )
 
@@ -160,11 +171,15 @@ def build_grouped_lessons_text(lessons: list) -> str:
         day_schools = grouped[day]
         school_order = [s for s in SCHOOLS if s in day_schools] + [s for s in sorted(day_schools) if s not in SCHOOLS]
         for school in school_order:
-            lines.append(school)
+            lines.append(escape(school))
             for lesson in day_schools[school]:
-                lines.append(
-                    f"{lesson['student_name']} {lesson['start_dt'].strftime('%H:%M')} - {lesson['end_dt'].strftime('%H:%M')}"
+                row_text = (
+                    f"{escape(lesson['student_name'])} "
+                    f"{lesson['start_dt'].strftime('%H:%M')} - {lesson['end_dt'].strftime('%H:%M')}"
                 )
+                if lesson.get("is_confirmed"):
+                    row_text = f"<s>{row_text}</s>"
+                lines.append(row_text)
             lines.append("")
 
     return "\n".join(lines).strip()
@@ -222,7 +237,7 @@ async def show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     totals_by_school = {str(row["school"]): float(row["total"]) for row in totals_by_school_rows}
 
     lessons_text = build_grouped_lessons_text(lessons)
-    await update.message.reply_text(lessons_text, reply_markup=main_keyboard())
+    await update.message.reply_text(lessons_text, reply_markup=main_keyboard(), parse_mode="HTML")
 
     if reports:
         lines = ["\nОтчеты:"]
@@ -573,6 +588,7 @@ async def need_end_minute_button(update: Update, context: ContextTypes.DEFAULT_T
 
 async def start_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
+    context.user_data.pop("report_lesson_id", None)
     await update.message.reply_text(
         "Введите Имя Фамилию ученика:",
         reply_markup=form_keyboard(),
@@ -584,6 +600,11 @@ async def start_report_from_button(update: Update, context: ContextTypes.DEFAULT
     register_chat_from_update(update)
     query = update.callback_query
     await query.answer()
+    lesson_id = None
+    parts = query.data.split(":")
+    if len(parts) == 2 and parts[1].isdigit():
+        lesson_id = int(parts[1])
+    context.user_data["report_lesson_id"] = lesson_id
     await query.message.reply_text(
         "Введите Имя Фамилию ученика:",
         reply_markup=form_keyboard(),
@@ -628,7 +649,12 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id
 
     storage.add_lesson_report(chat_id, full_name, school, payment, payment_uah)
-    pending_notifications = storage.consume_all_open_pending_report_notifications()
+    report_lesson_id = context.user_data.get("report_lesson_id")
+    if report_lesson_id:
+        pending_notifications = storage.consume_open_pending_report_notifications_for_lesson(int(report_lesson_id))
+    else:
+        latest_notification = storage.consume_latest_open_pending_report_notification()
+        pending_notifications = [latest_notification] if latest_notification else []
     for notification in pending_notifications:
         try:
             await context.bot.delete_message(
@@ -648,16 +674,43 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=main_keyboard(),
         parse_mode="HTML",
     )
+    context.user_data.pop("report_lesson_id", None)
     context.user_data.clear()
     return ConversationHandler.END
 
 
 async def delete_all_records(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    register_chat_from_update(update)
     storage.delete_all_for_chat(chat_id=None)
     context.user_data.clear()
-    await update.message.reply_text("Все записи удалены.", reply_markup=main_keyboard())
     return ConversationHandler.END
+
+
+async def request_delete_all_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    register_chat_from_update(update)
+    await update.message.reply_text(
+        "Вы уверены, что хотите удалить все записи?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Да, удалить", callback_data="delete_all:confirm")],
+                [InlineKeyboardButton("Нет", callback_data="delete_all:cancel")],
+            ]
+        ),
+    )
+    return ConversationHandler.END
+
+
+async def confirm_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await delete_all_records(update, context)
+    await query.edit_message_text("Все записи удалены.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Готово.", reply_markup=main_keyboard())
+
+
+async def cancel_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Удаление отменено.")
 
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -763,6 +816,20 @@ async def edit_lesson_payload(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
+async def confirm_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer("Урок подтвержден")
+    parts = query.data.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        return
+    lesson_id = int(parts[1])
+    storage.mark_lesson_confirmed(lesson_id)
+    try:
+        await query.edit_message_text("Урок подтвержден. Спасибо!")
+    except Exception:
+        pass
+
+
 async def reject_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if update.message:
@@ -850,6 +917,7 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Школа: <b>{escape(action.school)}</b>\n"
             f"Время: {action.lesson_start_dt.strftime('%H:%M')} - {action.lesson_end_dt.strftime('%H:%M')}"
         )
+        sent_to_any = False
         for chat_id in get_registered_chat_ids(action.chat_id):
             try:
                 sent = await context.bot.send_message(
@@ -857,10 +925,14 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
                     text=prompt,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("Заполнить отчет", callback_data="open_report")]]
+                        [
+                            [InlineKeyboardButton("Заполнить отчет", callback_data=f"open_report:{action.lesson_id}")],
+                            [InlineKeyboardButton("Подтвердить урок", callback_data=f"confirm_lesson:{action.lesson_id}")],
+                        ]
                     ),
                 )
-                storage.add_pending_report_notification(chat_id, int(sent.message_id))
+                storage.add_pending_report_notification(chat_id, int(sent.message_id), lesson_id=action.lesson_id)
+                sent_to_any = True
             except Exception as exc:
                 logger.exception(
                     "Не удалось отправить уведомление об отчете для lesson_id=%s chat_id=%s: %s",
@@ -868,7 +940,8 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id,
                     exc,
                 )
-        storage.delete_lesson_by_id(action.lesson_id)
+        if sent_to_any:
+            storage.mark_post_notified(action.lesson_id)
 
 
 async def morning_summary_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -946,14 +1019,14 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
-            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), delete_all_records),
+            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation),
         ],
     )
 
     report_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex(f"^{BTN_REPORT}$"), start_report),
-            CallbackQueryHandler(start_report_from_button, pattern=r"^open_report$"),
+            CallbackQueryHandler(start_report_from_button, pattern=r"^open_report(?::\d+)?$"),
         ],
         states={
             REPORT_NAME: [
@@ -970,7 +1043,7 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
-            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), delete_all_records),
+            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation),
         ],
     )
 
@@ -984,16 +1057,19 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
-            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), delete_all_records),
+            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation),
         ],
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ALL}$"), show_all))
-    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), delete_all_records))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation))
     app.add_handler(lesson_conv)
     app.add_handler(report_conv)
     app.add_handler(edit_conv)
+    app.add_handler(CallbackQueryHandler(confirm_delete_all, pattern=r"^delete_all:confirm$"))
+    app.add_handler(CallbackQueryHandler(cancel_delete_all, pattern=r"^delete_all:cancel$"))
+    app.add_handler(CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back))
     app.add_handler(MessageHandler(filters.COMMAND, reject_command))
     app.add_handler(
@@ -1022,6 +1098,11 @@ if __name__ == "__main__":
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Не задан BOT_TOKEN. Добавьте токен в переменную окружения.")
+    if (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")) and not str(storage.db_path).startswith("/data/"):
+        logger.warning(
+            "DB_PATH=%s. Для постоянного хранения на Railway рекомендуем /data/bot_data.sqlite3 и подключенный Volume.",
+            storage.db_path,
+        )
 
     application = build_app(token)
     application.run_polling(close_loop=False)

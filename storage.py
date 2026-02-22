@@ -62,6 +62,8 @@ class Storage:
                         end_reminder_dt TEXT NOT NULL,
                         reminded INTEGER NOT NULL DEFAULT 0,
                         end_reminded INTEGER NOT NULL DEFAULT 0,
+                        is_confirmed INTEGER NOT NULL DEFAULT 0,
+                        post_notified INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL
                     )
                     """
@@ -74,6 +76,10 @@ class Storage:
                     conn.execute("ALTER TABLE lessons ADD COLUMN end_reminder_dt TEXT")
                 if "end_reminded" not in lesson_column_names:
                     conn.execute("ALTER TABLE lessons ADD COLUMN end_reminded INTEGER NOT NULL DEFAULT 1")
+                if "is_confirmed" not in lesson_column_names:
+                    conn.execute("ALTER TABLE lessons ADD COLUMN is_confirmed INTEGER NOT NULL DEFAULT 0")
+                if "post_notified" not in lesson_column_names:
+                    conn.execute("ALTER TABLE lessons ADD COLUMN post_notified INTEGER NOT NULL DEFAULT 0")
 
                 conn.execute(
                     """
@@ -102,6 +108,7 @@ class Storage:
                     CREATE TABLE IF NOT EXISTS pending_report_notifications (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         chat_id INTEGER NOT NULL,
+                        lesson_id INTEGER,
                         message_id INTEGER NOT NULL,
                         is_open INTEGER NOT NULL DEFAULT 1,
                         created_at TEXT NOT NULL
@@ -114,6 +121,10 @@ class Storage:
                     conn.execute(
                         "ALTER TABLE lesson_reports ADD COLUMN payment_uah REAL NOT NULL DEFAULT 0"
                     )
+                pending_columns = conn.execute("PRAGMA table_info(pending_report_notifications)").fetchall()
+                pending_column_names = {str(row["name"]) for row in pending_columns}
+                if "lesson_id" not in pending_column_names:
+                    conn.execute("ALTER TABLE pending_report_notifications ADD COLUMN lesson_id INTEGER")
                 conn.commit()
 
     def upsert_chat(self, chat_id: int, teacher_name: str) -> None:
@@ -248,6 +259,7 @@ class Storage:
                     SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt
                     FROM lessons
                     WHERE lesson_end_dt IS NOT NULL
+                      AND post_notified = 0
                       AND lesson_end_dt <= ?
                     ORDER BY lesson_end_dt ASC
                     """,
@@ -290,6 +302,18 @@ class Storage:
         with self._lock:
             with self._connect() as conn:
                 conn.execute("DELETE FROM lessons WHERE id = ?", (lesson_id,))
+                conn.commit()
+
+    def mark_post_notified(self, lesson_id: int) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("UPDATE lessons SET post_notified = 1 WHERE id = ?", (lesson_id,))
+                conn.commit()
+
+    def mark_lesson_confirmed(self, lesson_id: int) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("UPDATE lessons SET is_confirmed = 1 WHERE id = ?", (lesson_id,))
                 conn.commit()
 
     def add_lesson_report(
@@ -347,7 +371,9 @@ class Storage:
                         reminder_dt = ?,
                         end_reminder_dt = ?,
                         reminded = 0,
-                        end_reminded = 0
+                        end_reminded = 0,
+                        is_confirmed = 0,
+                        post_notified = 0
                     WHERE id = ?
                     """,
                     (
@@ -368,7 +394,7 @@ class Storage:
                 if chat_id is None:
                     return conn.execute(
                         """
-                        SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded
+                        SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded, is_confirmed
                         FROM lessons
                         ORDER BY lesson_dt ASC
                         LIMIT ?
@@ -377,7 +403,7 @@ class Storage:
                     ).fetchall()
                 return conn.execute(
                     """
-                    SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded
+                    SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded, is_confirmed
                     FROM lessons
                     WHERE chat_id = ?
                     ORDER BY lesson_dt ASC
@@ -391,7 +417,7 @@ class Storage:
             with self._connect() as conn:
                 return conn.execute(
                     """
-                    SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded
+                    SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt, reminded, end_reminded, is_confirmed
                     FROM lessons
                     ORDER BY lesson_dt ASC
                     """
@@ -494,16 +520,16 @@ class Storage:
                     ),
                 ).fetchall()
 
-    def add_pending_report_notification(self, chat_id: int, message_id: int) -> None:
+    def add_pending_report_notification(self, chat_id: int, message_id: int, lesson_id: Optional[int]) -> None:
         created_at = datetime.now().isoformat(timespec="seconds")
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
                     """
-                    INSERT INTO pending_report_notifications (chat_id, message_id, is_open, created_at)
-                    VALUES (?, ?, 1, ?)
+                    INSERT INTO pending_report_notifications (chat_id, lesson_id, message_id, is_open, created_at)
+                    VALUES (?, ?, ?, 1, ?)
                     """,
-                    (chat_id, message_id, created_at),
+                    (chat_id, lesson_id, message_id, created_at),
                 )
                 conn.commit()
 
@@ -528,16 +554,37 @@ class Storage:
                     conn.commit()
                 return row
 
-    def consume_all_open_pending_report_notifications(self) -> List[sqlite3.Row]:
+    def consume_latest_open_pending_report_notification(self) -> Optional[sqlite3.Row]:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, chat_id, message_id
+                    FROM pending_report_notifications
+                    WHERE is_open = 1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if row:
+                    conn.execute(
+                        "UPDATE pending_report_notifications SET is_open = 0 WHERE id = ?",
+                        (int(row["id"]),),
+                    )
+                    conn.commit()
+                return row
+
+    def consume_open_pending_report_notifications_for_lesson(self, lesson_id: int) -> List[sqlite3.Row]:
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
                     SELECT id, chat_id, message_id
                     FROM pending_report_notifications
-                    WHERE is_open = 1
+                    WHERE is_open = 1 AND lesson_id = ?
                     ORDER BY created_at DESC
-                    """
+                    """,
+                    (lesson_id,),
                 ).fetchall()
                 if rows:
                     ids = [int(row["id"]) for row in rows]
