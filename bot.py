@@ -4,6 +4,7 @@ import calendar
 import re
 from html import escape
 from datetime import datetime, timedelta, time as dt_time
+from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
@@ -78,7 +79,26 @@ def resolve_db_path() -> str:
     return "bot_data.sqlite3"
 
 
-storage = Storage(resolve_db_path())
+def validate_runtime_storage_path(db_path: str) -> None:
+    in_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+    if not in_railway:
+        return
+
+    db_path_obj = Path(db_path)
+    db_path_str = str(db_path_obj)
+    if not db_path_obj.is_absolute() or not db_path_str.startswith("/data/"):
+        raise RuntimeError(
+            "Для Railway задайте DB_PATH внутри /data, например: /data/bot_data.sqlite3"
+        )
+    if not Path("/data").exists():
+        raise RuntimeError(
+            "Не найден путь /data. Подключите Railway Volume и смонтируйте его в /data."
+        )
+
+
+DB_PATH = resolve_db_path()
+validate_runtime_storage_path(DB_PATH)
+storage = Storage(DB_PATH)
 
 
 def get_app_timezone():
@@ -1035,11 +1055,6 @@ if __name__ == "__main__":
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Не задан BOT_TOKEN. Добавьте токен в переменную окружения.")
-    if (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")) and not str(storage.db_path).startswith("/data/"):
-        logger.warning(
-            "DB_PATH=%s. Для постоянного хранения на Railway рекомендуем /data/bot_data.sqlite3 и подключенный Volume.",
-            storage.db_path,
-        )
 
     application = build_app(token)
     application.run_polling(close_loop=False)

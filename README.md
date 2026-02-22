@@ -47,4 +47,5 @@ APP_TZ=Europe/Kyiv
 3. Обязательно подключите `Volume` и примонтируйте в `/data`.
 4. Railway запускает бота командой из `railway.json`: `python bot.py`.
 
-Важно: без Volume база SQLite на Railway может теряться при redeploy.
+Важно: без Volume база SQLite на Railway теряется при redeploy.  
+Теперь бот в Railway не запустится, если `DB_PATH` не в `/data` или `/data` не смонтирован.
