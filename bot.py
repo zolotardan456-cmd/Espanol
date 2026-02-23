@@ -1145,6 +1145,7 @@ def build_app(token: str) -> Application:
 
     app.job_queue.run_repeating(reminder_worker, interval=60, first=10)
     app.job_queue.run_daily(morning_summary_worker, time=dt_time(hour=9, minute=0))
+    app.job_queue.run_daily(morning_summary_worker, time=dt_time(hour=9, minute=30))
     return app
 
 
