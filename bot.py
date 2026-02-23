@@ -125,6 +125,10 @@ def form_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[BTN_BACK]], resize_keyboard=True)
 
 
+def edit_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([[BTN_DELETE_ONE, BTN_BACK]], resize_keyboard=True)
+
+
 def teacher_name_from_update(update: Update) -> str:
     user = update.effective_user
     if user and user.first_name and user.first_name.strip():
@@ -358,7 +362,10 @@ async def start_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Выберите запись, которую хотите перезаписать:",
         reply_markup=lesson_edit_keyboard(lessons),
     )
-    await update.message.reply_text("Нажмите «Назад», чтобы выйти.", reply_markup=form_keyboard())
+    await update.message.reply_text(
+        "Можно выбрать: «Удалить запись» или «Назад».",
+        reply_markup=edit_menu_keyboard(),
+    )
     return EDIT_SELECT
 
 
@@ -1171,6 +1178,7 @@ def build_app(token: str) -> Application:
             ],
             EDIT_SELECT: [
                 CallbackQueryHandler(pick_edit_lesson, pattern=r"^edit_lesson:\d+$"),
+                MessageHandler(filters.Regex(f"^{BTN_DELETE_ONE}$"), start_delete_menu),
             ],
             DELETE_SELECT: [
                 CallbackQueryHandler(pick_delete_lesson, pattern=r"^delete_lesson:\d+$"),
