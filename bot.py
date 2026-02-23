@@ -114,6 +114,11 @@ def get_app_timezone():
     return get_localzone()
 
 
+def local_now() -> datetime:
+    # Keep lesson scheduling/reminders in the same wall clock as APP_TZ.
+    return datetime.now(get_app_timezone()).replace(tzinfo=None)
+
+
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[BTN_LESSON, BTN_REPORT], [BTN_ALL, BTN_EDIT], [BTN_DELETE_ONE, BTN_DELETE_ALL]],
@@ -127,15 +132,6 @@ def form_keyboard() -> ReplyKeyboardMarkup:
 
 def edit_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[BTN_DELETE_ONE, BTN_BACK]], resize_keyboard=True)
-
-
-def edit_actions_inline_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Удалить запись", callback_data="edit_action:delete")],
-            [InlineKeyboardButton("Назад", callback_data="edit_action:back")],
-        ]
-    )
 
 
 def teacher_name_from_update(update: Update) -> str:
@@ -193,7 +189,12 @@ async def broadcast_to_registered(
 
 
 def lesson_edit_keyboard(lessons: list) -> InlineKeyboardMarkup:
-    rows = []
+    rows = [
+        [
+            InlineKeyboardButton("Удалить запись", callback_data="edit_action:delete"),
+            InlineKeyboardButton("Назад", callback_data="edit_action:back"),
+        ]
+    ]
     for row in lessons[:30]:
         lesson_id = int(row["id"])
         start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
@@ -368,12 +369,9 @@ async def start_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     await update.message.reply_text(
-        "Выберите запись, которую хотите перезаписать:",
+        "Выберите запись, которую хотите перезаписать.\n"
+        "Кнопки «Удалить запись» и «Назад» сверху.",
         reply_markup=lesson_edit_keyboard(lessons),
-    )
-    await update.message.reply_text(
-        "Действия:",
-        reply_markup=edit_actions_inline_keyboard(),
     )
     await update.message.reply_text(
         "Можно выбрать: «Удалить запись» или «Назад».",
@@ -561,7 +559,7 @@ async def lesson_school(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def lesson_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["lesson_student"] = update.message.text.strip()
-    now = datetime.now()
+    now = local_now()
     context.user_data["calendar_year"] = now.year
     context.user_data["calendar_month"] = now.month
     await update.message.reply_text(
@@ -605,7 +603,7 @@ async def lesson_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         month = int(parts[3])
         day = int(parts[4])
         selected_date = datetime(year, month, day).date()
-        if selected_date < datetime.now().date():
+        if selected_date < local_now().date():
             await query.answer("Нельзя выбрать прошедшую дату", show_alert=True)
             return LESSON_DATE
 
@@ -620,7 +618,7 @@ async def lesson_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 
 async def need_date_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    now = datetime.now()
+    now = local_now()
     await update.message.reply_text(
         "Выберите дату кликом в календаре:",
         reply_markup=calendar_keyboard(now.year, now.month),
@@ -671,7 +669,7 @@ async def lesson_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     lesson_date_value = datetime.strptime(date_iso, "%Y-%m-%d").date()
     lesson_start_dt = datetime.combine(lesson_date_value, start_time)
 
-    now = datetime.now()
+    now = local_now()
     if lesson_start_dt <= now:
         await query.edit_message_text(
             "Дата и время должны быть в будущем.\nВыберите час заново:",
@@ -743,12 +741,12 @@ async def lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return LESSON_END_HOUR
 
-    now = datetime.now()
+    now = local_now()
     start_reminder_dt = lesson_start_dt - timedelta(minutes=30)
     if start_reminder_dt < now:
         start_reminder_dt = now
 
-    end_reminder_dt = lesson_end_dt - timedelta(minutes=10)
+    end_reminder_dt = lesson_end_dt - timedelta(minutes=15)
     if end_reminder_dt < now:
         end_reminder_dt = now
 
@@ -788,7 +786,7 @@ async def lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"Урок: с {lesson_start_dt.strftime('%H:%M')} до {lesson_end_dt.strftime('%H:%M')}\n\n"
         "Напоминания:\n"
         "- за 30 минут до начала\n"
-        "- за 10 минут до конца",
+        "- за 15 минут до конца",
         parse_mode="HTML",
     )
     await query.message.reply_text("Готово.", reply_markup=main_keyboard())
@@ -1037,7 +1035,7 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
-    now = datetime.now()
+    now = local_now()
 
     start_reminders = storage.get_due_start_reminders(now)
     for reminder in start_reminders:
@@ -1070,7 +1068,7 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     end_reminders = storage.get_due_end_reminders(now)
     for reminder in end_reminders:
-        message = f"{reminder.student_name}, урок подходит к концу. Осталось 10 минут."
+        message = f"{reminder.student_name}, урок подходит к концу. Осталось 15 минут."
         sent_to_any = False
         for chat_id in get_registered_chat_ids(reminder.chat_id):
             try:
@@ -1127,7 +1125,7 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def morning_summary_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
-    now = datetime.now()
+    now = local_now()
     day_start = datetime(now.year, now.month, now.day, 0, 0, 0)
     day_end = day_start + timedelta(days=1)
 
