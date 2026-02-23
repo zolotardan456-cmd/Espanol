@@ -129,6 +129,15 @@ def edit_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[BTN_DELETE_ONE, BTN_BACK]], resize_keyboard=True)
 
 
+def edit_actions_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Удалить запись", callback_data="edit_action:delete")],
+            [InlineKeyboardButton("Назад", callback_data="edit_action:back")],
+        ]
+    )
+
+
 def teacher_name_from_update(update: Update) -> str:
     user = update.effective_user
     if user and user.first_name and user.first_name.strip():
@@ -363,6 +372,10 @@ async def start_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reply_markup=lesson_edit_keyboard(lessons),
     )
     await update.message.reply_text(
+        "Действия:",
+        reply_markup=edit_actions_inline_keyboard(),
+    )
+    await update.message.reply_text(
         "Можно выбрать: «Удалить запись» или «Назад».",
         reply_markup=edit_menu_keyboard(),
     )
@@ -370,18 +383,31 @@ async def start_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def start_delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query:
+        await update.callback_query.answer()
     register_chat_from_update(update)
+    target_message = update.effective_message
+    if not target_message:
+        return ConversationHandler.END
     lessons = storage.list_all_lessons_for_view()
     if not lessons:
-        await update.message.reply_text("Нет записей для удаления.", reply_markup=main_keyboard())
+        await target_message.reply_text("Нет записей для удаления.", reply_markup=main_keyboard())
         return ConversationHandler.END
 
-    await update.message.reply_text(
+    await target_message.reply_text(
         "Выберите запись, которую хотите удалить:",
         reply_markup=lesson_delete_keyboard(lessons),
     )
-    await update.message.reply_text("Нажмите «Назад», чтобы выйти.", reply_markup=form_keyboard())
+    await target_message.reply_text("Нажмите «Назад», чтобы выйти.", reply_markup=form_keyboard())
     return DELETE_SELECT
+
+
+async def back_from_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    await query.message.reply_text("Возврат в главное меню.", reply_markup=main_keyboard())
+    return ConversationHandler.END
 
 
 async def pick_edit_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1178,6 +1204,8 @@ def build_app(token: str) -> Application:
             ],
             EDIT_SELECT: [
                 CallbackQueryHandler(pick_edit_lesson, pattern=r"^edit_lesson:\d+$"),
+                CallbackQueryHandler(start_delete_menu, pattern=r"^edit_action:delete$"),
+                CallbackQueryHandler(back_from_inline, pattern=r"^edit_action:back$"),
                 MessageHandler(filters.Regex(f"^{BTN_DELETE_ONE}$"), start_delete_menu),
             ],
             DELETE_SELECT: [
