@@ -5,7 +5,7 @@ import re
 from html import escape
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Any
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -73,7 +73,7 @@ SCHOOLS = [
 def resolve_db_path() -> str:
     explicit = os.getenv("DB_PATH")
     if explicit:
-        return explicit
+        return explicit.strip().strip('"').strip("'")
     if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
         return "/data/bot_data.sqlite3"
     return "bot_data.sqlite3"
@@ -88,7 +88,8 @@ def validate_runtime_storage_path(db_path: str) -> None:
     db_path_str = str(db_path_obj)
     if not db_path_obj.is_absolute() or not db_path_str.startswith("/data/"):
         raise RuntimeError(
-            "Для Railway задайте DB_PATH внутри /data, например: /data/bot_data.sqlite3"
+            "Для Railway задайте DB_PATH внутри /data, например: /data/bot_data.sqlite3. "
+            f"Текущее значение DB_PATH: {db_path_str!r}"
         )
     if not Path("/data").exists():
         raise RuntimeError(
@@ -141,6 +142,39 @@ def get_registered_chat_ids(fallback_chat_id: Optional[int] = None) -> List[int]
     if fallback_chat_id is not None and fallback_chat_id not in ids:
         ids.append(fallback_chat_id)
     return ids
+
+
+async def broadcast_to_registered(
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    fallback_chat_id: Optional[int] = None,
+    parse_mode: Optional[str] = None,
+    reply_markup: Optional[Any] = None,
+    delete_after_seconds: Optional[int] = None,
+    exclude_chat_id: Optional[int] = None,
+) -> int:
+    sent_count = 0
+    for chat_id in get_registered_chat_ids(fallback_chat_id):
+        if exclude_chat_id is not None and chat_id == exclude_chat_id:
+            continue
+        try:
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+            sent_count += 1
+            if delete_after_seconds is not None:
+                context.job_queue.run_once(
+                    delete_message_job,
+                    when=delete_after_seconds,
+                    data={"chat_id": chat_id, "message_id": int(sent.message_id)},
+                )
+        except Exception as exc:
+            logger.exception("Не удалось отправить рассылку для chat_id=%s: %s", chat_id, exc)
+    return sent_count
 
 
 def lesson_edit_keyboard(lessons: list) -> InlineKeyboardMarkup:
@@ -639,6 +673,19 @@ async def lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         parse_mode="HTML",
     )
     await query.message.reply_text("Готово.", reply_markup=main_keyboard())
+    await broadcast_to_registered(
+        context,
+        (
+            f"{header}\n"
+            f"Школа: <b>{escape(school)}</b>\n"
+            f"Ученик: {escape(student)}\n"
+            f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
+            f"Урок: с {lesson_start_dt.strftime('%H:%M')} до {lesson_end_dt.strftime('%H:%M')}"
+        ),
+        fallback_chat_id=chat_id,
+        parse_mode="HTML",
+        exclude_chat_id=chat_id,
+    )
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -736,6 +783,19 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=main_keyboard(),
         parse_mode="HTML",
     )
+    await broadcast_to_registered(
+        context,
+        (
+            "Сохранен новый отчет:\n"
+            f"Имя Фамилия: {escape(full_name)}\n"
+            f"Школа: <b>{escape(school)}</b>\n"
+            f"Оплата: {payment}\n"
+            f"Общая сумма оплат: {format_uah(total_uah)}"
+        ),
+        fallback_chat_id=chat_id,
+        parse_mode="HTML",
+        exclude_chat_id=chat_id,
+    )
     context.user_data.pop("report_lesson_id", None)
     context.user_data.clear()
     return ConversationHandler.END
@@ -764,9 +824,19 @@ async def request_delete_all_confirmation(update: Update, context: ContextTypes.
 async def confirm_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    register_chat_from_update(update)
+    chat = update.effective_chat
+    requester_chat_id = int(chat.id) if chat else None
     await delete_all_records(update, context)
     await query.edit_message_text("Все записи удалены.")
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Готово.", reply_markup=main_keyboard())
+    await broadcast_to_registered(
+        context,
+        "Все записи и отчеты удалены.",
+        fallback_chat_id=requester_chat_id,
+        reply_markup=main_keyboard(),
+        exclude_chat_id=requester_chat_id,
+    )
 
 
 async def cancel_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -785,15 +855,42 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def confirm_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer("Урок подтвержден")
+    register_chat_from_update(update)
     parts = query.data.split(":")
     if len(parts) != 2 or not parts[1].isdigit():
         return
     lesson_id = int(parts[1])
     storage.mark_lesson_confirmed(lesson_id)
+    lesson = storage.get_lesson_by_id(lesson_id)
     try:
         await query.edit_message_text("Урок подтвержден. Спасибо!")
     except Exception:
         pass
+    chat = update.effective_chat
+    actor_chat_id = int(chat.id) if chat else None
+    if lesson:
+        lesson_start_dt = datetime.fromisoformat(str(lesson["lesson_dt"]))
+        lesson_end_raw = lesson["lesson_end_dt"]
+        if lesson_end_raw:
+            lesson_end_dt = datetime.fromisoformat(str(lesson_end_raw))
+        else:
+            lesson_end_dt = lesson_start_dt + timedelta(hours=1)
+        text = (
+            "Урок подтвержден:\n"
+            f"Школа: <b>{escape(str(lesson['school']))}</b>\n"
+            f"Ученик: {escape(str(lesson['student_name']))}\n"
+            f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
+            f"Урок: {lesson_start_dt.strftime('%H:%M')} - {lesson_end_dt.strftime('%H:%M')}"
+        )
+    else:
+        text = f"Урок подтвержден (ID: {lesson_id})."
+    await broadcast_to_registered(
+        context,
+        text,
+        fallback_chat_id=actor_chat_id,
+        parse_mode="HTML",
+        exclude_chat_id=actor_chat_id,
+    )
 
 
 async def reject_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
