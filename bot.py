@@ -123,6 +123,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[BTN_LESSON, BTN_REPORT], [BTN_ALL, BTN_EDIT], [BTN_DELETE_ONE, BTN_DELETE_ALL]],
         resize_keyboard=True,
+        is_persistent=True,
     )
 
 
@@ -309,6 +310,8 @@ def parse_payment_uah(raw: str) -> Optional[float]:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     register_chat_from_update(update)
+    # Force Telegram client to refresh cached keyboard layout.
+    await update.message.reply_text("Обновляю меню…", reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text(
         "Выберите действие:",
         reply_markup=main_keyboard(),
