@@ -1046,13 +1046,13 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     start_reminders = storage.get_due_start_reminders(now)
     end_reminders = storage.get_due_end_reminders(now)
-    if start_reminders or end_reminders:
-        logger.info(
-            "reminder_worker now=%s start_due=%s end_due=%s",
-            now.isoformat(timespec="seconds"),
-            len(start_reminders),
-            len(end_reminders),
-        )
+    logger.info(
+        "reminder_worker now=%s start_due=%s end_due=%s chats=%s",
+        now.isoformat(timespec="seconds"),
+        len(start_reminders),
+        len(end_reminders),
+        len(get_registered_chat_ids()),
+    )
     for reminder in start_reminders:
         message = (
             "Напоминание: урок через 30 минут.\n\n"
@@ -1172,6 +1172,63 @@ async def morning_summary_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("Не удалось отправить утреннюю сводку для chat_id=%s: %s", chat_id, exc)
 
 
+async def debug_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    register_chat_from_update(update)
+    now = local_now()
+    lessons = storage.list_recent_lessons(chat_id=None, limit=300)
+    due_start = []
+    due_end = []
+    next_start = None
+    next_end = None
+
+    for row in lessons:
+        start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
+        end_raw = row["lesson_end_dt"]
+        end_dt = datetime.fromisoformat(str(end_raw)) if end_raw else (start_dt + timedelta(hours=1))
+        reminded = int(row["reminded"]) if "reminded" in row.keys() else 0
+        end_reminded = int(row["end_reminded"]) if "end_reminded" in row.keys() else 0
+
+        if reminded == 0:
+            if next_start is None or start_dt < next_start:
+                next_start = start_dt
+            if start_dt - timedelta(minutes=30) <= now:
+                due_start.append(row)
+        if end_reminded == 0:
+            if next_end is None or end_dt < next_end:
+                next_end = end_dt
+            if end_dt - timedelta(minutes=15) <= now:
+                due_end.append(row)
+
+    lines = [
+        "Диагностика напоминаний:",
+        f"- Сейчас: {now.strftime('%d.%m.%Y %H:%M:%S')}",
+        f"- Зарегистрировано чатов: {len(get_registered_chat_ids(update.effective_chat.id if update.effective_chat else None))}",
+        f"- Уроков всего (limit=300): {len(lessons)}",
+        f"- Start due (30 мин): {len(due_start)}",
+        f"- End due (15 мин): {len(due_end)}",
+    ]
+
+    if next_start:
+        lines.append(f"- Ближайший start (reminded=0): {next_start.strftime('%d.%m.%Y %H:%M')}")
+    if next_end:
+        lines.append(f"- Ближайший end (end_reminded=0): {next_end.strftime('%d.%m.%Y %H:%M')}")
+
+    preview_rows = lessons[:5]
+    if preview_rows:
+        lines.append("")
+        lines.append("Первые 5 уроков:")
+        for row in preview_rows:
+            sdt = datetime.fromisoformat(str(row["lesson_dt"]))
+            edt_raw = row["lesson_end_dt"]
+            edt = datetime.fromisoformat(str(edt_raw)) if edt_raw else (sdt + timedelta(hours=1))
+            lines.append(
+                f"- id={row['id']} | {row['student_name']} | {sdt.strftime('%d.%m %H:%M')}-{edt.strftime('%H:%M')} "
+                f"| reminded={row['reminded']} end_reminded={row['end_reminded']}"
+            )
+
+    await update.message.reply_text("\n".join(lines), reply_markup=main_keyboard())
+
+
 def build_app(token: str) -> Application:
     local_tz = get_app_timezone()
     app = (
@@ -1255,6 +1312,7 @@ def build_app(token: str) -> Application:
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("debug_reminders", debug_reminders))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ALL}$"), show_all))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation))
     app.add_handler(lesson_conv)
