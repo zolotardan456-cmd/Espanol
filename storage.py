@@ -186,22 +186,22 @@ class Storage:
                 return int(cur.lastrowid)
 
     def get_due_start_reminders(self, now: datetime) -> List[LessonStartReminder]:
-        now_str = now.isoformat(timespec="seconds")
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
                     SELECT id, chat_id, school, student_name, lesson_dt, lesson_end_dt
                     FROM lessons
-                    WHERE reminded = 0 AND reminder_dt <= ?
+                    WHERE reminded = 0
                     ORDER BY lesson_dt ASC
                     """,
-                    (now_str,),
                 ).fetchall()
 
         reminders: List[LessonStartReminder] = []
         for row in rows:
             lesson_start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
+            if lesson_start_dt - timedelta(minutes=30) > now:
+                continue
             lesson_end_raw = row["lesson_end_dt"]
             if lesson_end_raw:
                 lesson_end_dt = datetime.fromisoformat(str(lesson_end_raw))
@@ -220,7 +220,6 @@ class Storage:
         return reminders
 
     def get_due_end_reminders(self, now: datetime) -> List[LessonEndReminder]:
-        now_str = now.isoformat(timespec="seconds")
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
@@ -228,11 +227,9 @@ class Storage:
                     SELECT id, chat_id, student_name, lesson_end_dt
                     FROM lessons
                     WHERE end_reminded = 0
-                      AND end_reminder_dt IS NOT NULL
-                      AND end_reminder_dt <= ?
+                      AND lesson_end_dt IS NOT NULL
                     ORDER BY lesson_end_dt ASC
-                    """,
-                    (now_str,),
+                    """
                 ).fetchall()
 
         reminders: List[LessonEndReminder] = []
@@ -240,12 +237,15 @@ class Storage:
             lesson_end_raw = row["lesson_end_dt"]
             if not lesson_end_raw:
                 continue
+            lesson_end_dt = datetime.fromisoformat(str(lesson_end_raw))
+            if lesson_end_dt - timedelta(minutes=15) > now:
+                continue
             reminders.append(
                 LessonEndReminder(
                     lesson_id=int(row["id"]),
                     chat_id=int(row["chat_id"]),
                     student_name=str(row["student_name"]),
-                    lesson_end_dt=datetime.fromisoformat(str(lesson_end_raw)),
+                    lesson_end_dt=lesson_end_dt,
                 )
             )
         return reminders

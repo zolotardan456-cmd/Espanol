@@ -33,6 +33,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+APP_TZ_FALLBACK = "Europe/Kyiv"
 
 BTN_LESSON = "Записать на урок"
 BTN_REPORT = "Отчет о уроке"
@@ -110,8 +111,11 @@ def get_app_timezone():
         try:
             return ZoneInfo(tz_name)
         except Exception:
-            logger.warning("Некорректный APP_TZ=%s, использую системный часовой пояс", tz_name)
-    return get_localzone()
+            logger.warning("Некорректный APP_TZ=%s, использую %s", tz_name, APP_TZ_FALLBACK)
+    try:
+        return ZoneInfo(APP_TZ_FALLBACK)
+    except Exception:
+        return get_localzone()
 
 
 def local_now() -> datetime:
@@ -1041,6 +1045,14 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
     now = local_now()
 
     start_reminders = storage.get_due_start_reminders(now)
+    end_reminders = storage.get_due_end_reminders(now)
+    if start_reminders or end_reminders:
+        logger.info(
+            "reminder_worker now=%s start_due=%s end_due=%s",
+            now.isoformat(timespec="seconds"),
+            len(start_reminders),
+            len(end_reminders),
+        )
     for reminder in start_reminders:
         message = (
             "Напоминание: урок через 30 минут.\n\n"
@@ -1069,7 +1081,6 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
         if sent_to_any:
             storage.mark_start_reminded(reminder.lesson_id)
 
-    end_reminders = storage.get_due_end_reminders(now)
     for reminder in end_reminders:
         message = f"{reminder.student_name}, урок подходит к концу. Осталось 15 минут."
         sent_to_any = False
