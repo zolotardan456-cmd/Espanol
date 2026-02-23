@@ -39,6 +39,7 @@ BTN_REPORT = "Отчет о уроке"
 BTN_ALL = "Все записи"
 BTN_DELETE_ALL = "Удалить все записи"
 BTN_EDIT = "Редактировать запись"
+BTN_DELETE_ONE = "Удалить запись"
 BTN_BACK = "Назад"
 WEEKDAYS_RU = [
     "Понедельник",
@@ -64,10 +65,11 @@ SCHOOLS = [
     LESSON_END_HOUR,
     LESSON_END_MINUTE,
     EDIT_SELECT,
+    DELETE_SELECT,
     REPORT_NAME,
     REPORT_SCHOOL,
     REPORT_PAYMENT,
-) = range(11)
+) = range(12)
 
 
 def resolve_db_path() -> str:
@@ -114,7 +116,7 @@ def get_app_timezone():
 
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[BTN_LESSON, BTN_REPORT], [BTN_ALL, BTN_EDIT], [BTN_DELETE_ALL]],
+        [[BTN_LESSON, BTN_REPORT], [BTN_ALL, BTN_EDIT], [BTN_DELETE_ONE, BTN_DELETE_ALL]],
         resize_keyboard=True,
     )
 
@@ -187,6 +189,22 @@ def lesson_edit_keyboard(lessons: list) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     f"✏️ {row['student_name']} {start_dt.strftime('%d.%m %H:%M')}",
                     callback_data=f"edit_lesson:{lesson_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows) if rows else InlineKeyboardMarkup([])
+
+
+def lesson_delete_keyboard(lessons: list) -> InlineKeyboardMarkup:
+    rows = []
+    for row in lessons[:30]:
+        lesson_id = int(row["id"])
+        start_dt = datetime.fromisoformat(str(row["lesson_dt"]))
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🗑 {row['student_name']} {start_dt.strftime('%d.%m %H:%M')}",
+                    callback_data=f"delete_lesson:{lesson_id}",
                 )
             ]
         )
@@ -344,6 +362,21 @@ async def start_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return EDIT_SELECT
 
 
+async def start_delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    register_chat_from_update(update)
+    lessons = storage.list_all_lessons_for_view()
+    if not lessons:
+        await update.message.reply_text("Нет записей для удаления.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Выберите запись, которую хотите удалить:",
+        reply_markup=lesson_delete_keyboard(lessons),
+    )
+    await update.message.reply_text("Нажмите «Назад», чтобы выйти.", reply_markup=form_keyboard())
+    return DELETE_SELECT
+
+
 async def pick_edit_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -359,6 +392,59 @@ async def pick_edit_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         reply_markup=school_keyboard("school"),
     )
     return LESSON_SCHOOL
+
+
+async def pick_delete_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    lesson_id = int(query.data.split(":")[1])
+    lesson = storage.get_lesson_by_id(lesson_id)
+    if not lesson:
+        await query.message.reply_text("Запись не найдена.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    lesson_start_dt = datetime.fromisoformat(str(lesson["lesson_dt"]))
+    lesson_end_raw = lesson["lesson_end_dt"]
+    if lesson_end_raw:
+        lesson_end_dt = datetime.fromisoformat(str(lesson_end_raw))
+    else:
+        lesson_end_dt = lesson_start_dt + timedelta(hours=1)
+
+    # Закрываем и удаляем старые сообщения с напоминанием о заполнении отчета для этого урока.
+    pending_notifications = storage.consume_open_pending_report_notifications_for_lesson(lesson_id)
+    for notification in pending_notifications:
+        try:
+            await context.bot.delete_message(
+                chat_id=int(notification["chat_id"]),
+                message_id=int(notification["message_id"]),
+            )
+        except Exception:
+            pass
+
+    storage.delete_lesson_by_id(lesson_id)
+
+    deleted_text = (
+        "Запись удалена:\n"
+        f"Школа: <b>{escape(str(lesson['school']))}</b>\n"
+        f"Ученик: {escape(str(lesson['student_name']))}\n"
+        f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
+        f"Урок: {lesson_start_dt.strftime('%H:%M')} - {lesson_end_dt.strftime('%H:%M')}"
+    )
+    await query.edit_message_text(deleted_text, parse_mode="HTML")
+    await query.message.reply_text("Готово.", reply_markup=main_keyboard())
+
+    chat = update.effective_chat
+    actor_chat_id = int(chat.id) if chat else None
+    await broadcast_to_registered(
+        context,
+        deleted_text,
+        fallback_chat_id=actor_chat_id,
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
+        exclude_chat_id=actor_chat_id,
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 def school_keyboard(prefix: str) -> InlineKeyboardMarkup:
@@ -1058,6 +1144,7 @@ def build_app(token: str) -> Application:
         entry_points=[
             MessageHandler(filters.Regex(f"^{BTN_LESSON}$"), start_lesson),
             MessageHandler(filters.Regex(f"^{BTN_EDIT}$"), start_edit_menu),
+            MessageHandler(filters.Regex(f"^{BTN_DELETE_ONE}$"), start_delete_menu),
         ],
         states={
             LESSON_SCHOOL: [
@@ -1084,6 +1171,9 @@ def build_app(token: str) -> Application:
             ],
             EDIT_SELECT: [
                 CallbackQueryHandler(pick_edit_lesson, pattern=r"^edit_lesson:\d+$"),
+            ],
+            DELETE_SELECT: [
+                CallbackQueryHandler(pick_delete_lesson, pattern=r"^delete_lesson:\d+$"),
             ],
         },
         fallbacks=[
