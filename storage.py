@@ -431,7 +431,7 @@ class Storage:
                         """
                         SELECT full_name, school, payment, payment_uah, created_at
                         FROM lesson_reports
-                        ORDER BY created_at DESC
+                        ORDER BY created_at ASC
                         LIMIT ?
                         """,
                         (limit,),
@@ -441,7 +441,7 @@ class Storage:
                     SELECT full_name, school, payment, payment_uah, created_at
                     FROM lesson_reports
                     WHERE chat_id = ?
-                    ORDER BY created_at DESC
+                    ORDER BY created_at ASC
                     LIMIT ?
                     """,
                     (chat_id, limit),

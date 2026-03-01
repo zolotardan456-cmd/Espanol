@@ -950,7 +950,7 @@ async def request_clear_lessons_confirmation(update: Update, context: ContextTyp
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("Да, очистить записи", callback_data="clear_lessons:confirm")],
-                [InlineKeyboardButton("Нет", callback_data="clear_action:cancel")],
+                [InlineKeyboardButton("Назад", callback_data="clear_action:cancel")],
             ]
         ),
     )
@@ -964,7 +964,7 @@ async def request_clear_reports_confirmation(update: Update, context: ContextTyp
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("Да, очистить отчеты", callback_data="clear_reports:confirm")],
-                [InlineKeyboardButton("Нет", callback_data="clear_action:cancel")],
+                [InlineKeyboardButton("Назад", callback_data="clear_action:cancel")],
             ]
         ),
     )
@@ -973,9 +973,11 @@ async def request_clear_reports_confirmation(update: Update, context: ContextTyp
 
 async def request_clear_school_sum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
+    rows = [[InlineKeyboardButton(school, callback_data=f"clear_school_select:{idx}")] for idx, school in enumerate(SCHOOLS)]
+    rows.append([InlineKeyboardButton("Назад", callback_data="clear_action:cancel")])
     await update.message.reply_text(
         "Выберите школу, для которой нужно обнулить сумму:",
-        reply_markup=school_keyboard("clear_school_select"),
+        reply_markup=InlineKeyboardMarkup(rows),
     )
     return ConversationHandler.END
 
@@ -995,7 +997,7 @@ async def pick_clear_school_sum(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("Да, очистить", callback_data=f"clear_school_confirm:{idx}")],
-                [InlineKeyboardButton("Нет", callback_data="clear_action:cancel")],
+                [InlineKeyboardButton("Назад", callback_data="clear_action:cancel")],
             ]
         ),
     )
@@ -1066,6 +1068,8 @@ async def cancel_clear_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Действие отменено.")
+    if query.message:
+        await query.message.reply_text("Возврат в главное меню.", reply_markup=main_keyboard())
 
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
