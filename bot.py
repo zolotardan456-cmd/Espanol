@@ -38,7 +38,9 @@ APP_TZ_FALLBACK = "Europe/Kyiv"
 BTN_LESSON = "Записать на урок"
 BTN_REPORT = "Отчет о уроке"
 BTN_ALL = "Все записи"
-BTN_DELETE_ALL = "Удалить все записи"
+BTN_CLEAR_LESSONS = "Очистить все записи"
+BTN_CLEAR_REPORTS = "Очистить все отчеты"
+BTN_CLEAR_SCHOOL_SUM = "Очистить сумму школы"
 BTN_EDIT = "Редактировать запись"
 BTN_DELETE_ONE = "Удалить запись"
 BTN_BACK = "Назад"
@@ -125,7 +127,12 @@ def local_now() -> datetime:
 
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[BTN_LESSON, BTN_REPORT], [BTN_ALL, BTN_EDIT], [BTN_DELETE_ONE, BTN_DELETE_ALL]],
+        [
+            [BTN_LESSON, BTN_REPORT],
+            [BTN_ALL, BTN_EDIT],
+            [BTN_DELETE_ONE, BTN_CLEAR_LESSONS],
+            [BTN_CLEAR_REPORTS, BTN_CLEAR_SCHOOL_SUM],
+        ],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -837,6 +844,17 @@ async def start_report_from_button(update: Update, context: ContextTypes.DEFAULT
     parts = query.data.split(":")
     if len(parts) == 2 and parts[1].isdigit():
         lesson_id = int(parts[1])
+    if lesson_id is not None:
+        lesson = storage.get_lesson_by_id(lesson_id)
+        if not lesson:
+            await query.message.reply_text("Урок не найден.", reply_markup=main_keyboard())
+            return ConversationHandler.END
+        if not bool(int(lesson["is_confirmed"])):
+            await query.message.reply_text(
+                "Сначала подтвердите урок, потом можно заполнять отчет.",
+                reply_markup=main_keyboard(),
+            )
+            return ConversationHandler.END
     context.user_data["report_lesson_id"] = lesson_id
     await query.message.reply_text(
         "Введите Имя Фамилию ученика:",
@@ -925,48 +943,129 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
-async def delete_all_records(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    storage.delete_all_for_chat(chat_id=None)
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-async def request_delete_all_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def request_clear_lessons_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
     await update.message.reply_text(
-        "Вы уверены, что хотите удалить все записи?",
+        "Вы уверены, что хотите очистить все записи на уроки?",
         reply_markup=InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Да, удалить", callback_data="delete_all:confirm")],
-                [InlineKeyboardButton("Нет", callback_data="delete_all:cancel")],
+                [InlineKeyboardButton("Да, очистить записи", callback_data="clear_lessons:confirm")],
+                [InlineKeyboardButton("Нет", callback_data="clear_action:cancel")],
             ]
         ),
     )
     return ConversationHandler.END
 
 
-async def confirm_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def request_clear_reports_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    register_chat_from_update(update)
+    await update.message.reply_text(
+        "Вы уверены, что хотите очистить все отчеты?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Да, очистить отчеты", callback_data="clear_reports:confirm")],
+                [InlineKeyboardButton("Нет", callback_data="clear_action:cancel")],
+            ]
+        ),
+    )
+    return ConversationHandler.END
+
+
+async def request_clear_school_sum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    register_chat_from_update(update)
+    await update.message.reply_text(
+        "Выберите школу, для которой нужно обнулить сумму:",
+        reply_markup=school_keyboard("clear_school_select"),
+    )
+    return ConversationHandler.END
+
+
+async def pick_clear_school_sum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        return
+    idx = int(parts[1])
+    if idx < 0 or idx >= len(SCHOOLS):
+        return
+    school = SCHOOLS[idx]
+    await query.edit_message_text(
+        f"Очистить все отчеты и сумму для школы {school}?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Да, очистить", callback_data=f"clear_school_confirm:{idx}")],
+                [InlineKeyboardButton("Нет", callback_data="clear_action:cancel")],
+            ]
+        ),
+    )
+
+
+async def confirm_clear_lessons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     register_chat_from_update(update)
     chat = update.effective_chat
     requester_chat_id = int(chat.id) if chat else None
-    await delete_all_records(update, context)
-    await query.edit_message_text("Все записи удалены.")
+    storage.delete_all_lessons(chat_id=None)
+    await query.edit_message_text("Все записи на уроки удалены.")
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Готово.", reply_markup=main_keyboard())
     await broadcast_to_registered(
         context,
-        "Все записи и отчеты удалены.",
+        "Все записи на уроки были очищены.",
         fallback_chat_id=requester_chat_id,
         reply_markup=main_keyboard(),
         exclude_chat_id=requester_chat_id,
     )
 
 
-async def cancel_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def confirm_clear_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("Удаление отменено.")
+    register_chat_from_update(update)
+    chat = update.effective_chat
+    requester_chat_id = int(chat.id) if chat else None
+    storage.delete_all_reports(chat_id=None)
+    await query.edit_message_text("Все отчеты удалены.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Готово.", reply_markup=main_keyboard())
+    await broadcast_to_registered(
+        context,
+        "Все отчеты были очищены.",
+        fallback_chat_id=requester_chat_id,
+        reply_markup=main_keyboard(),
+        exclude_chat_id=requester_chat_id,
+    )
+
+
+async def confirm_clear_school_sum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    register_chat_from_update(update)
+    parts = query.data.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        return
+    idx = int(parts[1])
+    if idx < 0 or idx >= len(SCHOOLS):
+        return
+    school = SCHOOLS[idx]
+    deleted_count = storage.delete_reports_for_school(school, chat_id=None)
+    chat = update.effective_chat
+    requester_chat_id = int(chat.id) if chat else None
+    await query.edit_message_text(f"Сумма по школе {school} очищена. Удалено отчетов: {deleted_count}.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Готово.", reply_markup=main_keyboard())
+    await broadcast_to_registered(
+        context,
+        f"Очищены отчеты по школе {school}. Удалено: {deleted_count}.",
+        fallback_chat_id=requester_chat_id,
+        reply_markup=main_keyboard(),
+        exclude_chat_id=requester_chat_id,
+    )
+
+
+async def cancel_clear_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Действие отменено.")
 
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -978,67 +1077,94 @@ async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def confirm_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer("Урок подтвержден")
+    await query.answer()
     register_chat_from_update(update)
     parts = query.data.split(":")
     if len(parts) != 2 or not parts[1].isdigit():
         return
     lesson_id = int(parts[1])
-    storage.mark_lesson_confirmed(lesson_id)
     lesson = storage.get_lesson_by_id(lesson_id)
+    if not lesson:
+        try:
+            await query.edit_message_text("Урок не найден.")
+        except Exception:
+            pass
+        return
+
+    already_confirmed = bool(int(lesson["is_confirmed"]))
+    if not already_confirmed:
+        storage.mark_lesson_confirmed(lesson_id)
+
     try:
-        await query.edit_message_text("Урок подтвержден. Спасибо!")
+        if already_confirmed:
+            await query.edit_message_text("Урок уже был подтвержден ранее.")
+        else:
+            await query.edit_message_text("Урок подтвержден. Теперь заполните отчет.")
     except Exception:
         pass
+
     chat = update.effective_chat
     actor_chat_id = int(chat.id) if chat else None
-    if lesson:
-        lesson_start_dt = datetime.fromisoformat(str(lesson["lesson_dt"]))
-        lesson_end_raw = lesson["lesson_end_dt"]
-        if lesson_end_raw:
-            lesson_end_dt = datetime.fromisoformat(str(lesson_end_raw))
-        else:
-            lesson_end_dt = lesson_start_dt + timedelta(hours=1)
-        text = (
-            "Урок подтвержден:\n"
-            f"Школа: <b>{escape(str(lesson['school']))}</b>\n"
-            f"Ученик: {escape(str(lesson['student_name']))}\n"
-            f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
-            f"Урок: {lesson_start_dt.strftime('%H:%M')} - {lesson_end_dt.strftime('%H:%M')}"
-        )
+    lesson_start_dt = datetime.fromisoformat(str(lesson["lesson_dt"]))
+    lesson_end_raw = lesson["lesson_end_dt"]
+    if lesson_end_raw:
+        lesson_end_dt = datetime.fromisoformat(str(lesson_end_raw))
     else:
-        text = f"Урок подтвержден (ID: {lesson_id})."
-    await broadcast_to_registered(
-        context,
-        text,
-        fallback_chat_id=actor_chat_id,
-        parse_mode="HTML",
-        exclude_chat_id=actor_chat_id,
+        lesson_end_dt = lesson_start_dt + timedelta(hours=1)
+
+    if already_confirmed:
+        return
+
+    report_prompt = (
+        "<b>Урок подтвержден</b>\n"
+        "Заполните отчет за урок:\n"
+        f"Школа: <b>{escape(str(lesson['school']))}</b>\n"
+        f"Ученик: {escape(str(lesson['student_name']))}\n"
+        f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
+        f"Время: {lesson_start_dt.strftime('%H:%M')} - {lesson_end_dt.strftime('%H:%M')}"
     )
+    for chat_id in get_registered_chat_ids(actor_chat_id):
+        try:
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=report_prompt,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Заполнить отчет", callback_data=f"open_report:{lesson_id}")]]
+                ),
+            )
+            storage.add_pending_report_notification(chat_id, int(sent.message_id), lesson_id=lesson_id)
+        except Exception as exc:
+            logger.exception(
+                "Не удалось отправить кнопку отчета для lesson_id=%s chat_id=%s: %s",
+                lesson_id,
+                chat_id,
+                exc,
+            )
 
 
 async def reject_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        if update.message:
-            await update.message.delete()
-    except Exception:
-        pass
+    if update.message:
+        await update.message.reply_text(
+            "Сейчас доступно только управление кнопками бота.",
+            reply_markup=main_keyboard(),
+        )
 
 
 async def reject_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        if update.message:
-            await update.message.delete()
-    except Exception:
-        pass
+    if update.message:
+        await update.message.reply_text(
+            "Используйте кнопки меню. Текст вводится только на шагах формы.",
+            reply_markup=main_keyboard(),
+        )
 
 
 async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        if update.message:
-            await update.message.delete()
-    except Exception:
-        pass
+    if update.message:
+        await update.message.reply_text(
+            "Неизвестная команда. Используйте /start.",
+            reply_markup=main_keyboard(),
+        )
 
 
 async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1106,8 +1232,9 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
     post_actions = storage.get_due_post_lesson_actions(now)
     for action in post_actions:
         prompt = (
-            "<b>Заполните отчет</b>\n"
-            f"Урок завершен: {escape(action.student_name)}\n"
+            "<b>Урок завершен</b>\n"
+            "Сначала подтвердите урок:\n"
+            f"Ученик: {escape(action.student_name)}\n"
             f"Школа: <b>{escape(action.school)}</b>\n"
             f"Время: {action.lesson_start_dt.strftime('%H:%M')} - {action.lesson_end_dt.strftime('%H:%M')}"
         )
@@ -1120,16 +1247,14 @@ async def reminder_worker(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(
                         [
-                            [InlineKeyboardButton("Заполнить отчет", callback_data=f"open_report:{action.lesson_id}")],
                             [InlineKeyboardButton("Подтвердить урок", callback_data=f"confirm_lesson:{action.lesson_id}")],
                         ]
                     ),
                 )
-                storage.add_pending_report_notification(chat_id, int(sent.message_id), lesson_id=action.lesson_id)
                 sent_to_any = True
             except Exception as exc:
                 logger.exception(
-                    "Не удалось отправить уведомление об отчете для lesson_id=%s chat_id=%s: %s",
+                    "Не удалось отправить уведомление о подтверждении урока lesson_id=%s chat_id=%s: %s",
                     action.lesson_id,
                     chat_id,
                     exc,
@@ -1283,7 +1408,9 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
-            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
         ],
     )
 
@@ -1307,18 +1434,25 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
-            MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
         ],
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("debug_reminders", debug_reminders))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ALL}$"), show_all))
-    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_DELETE_ALL}$"), request_delete_all_confirmation))
     app.add_handler(lesson_conv)
     app.add_handler(report_conv)
-    app.add_handler(CallbackQueryHandler(confirm_delete_all, pattern=r"^delete_all:confirm$"))
-    app.add_handler(CallbackQueryHandler(cancel_delete_all, pattern=r"^delete_all:cancel$"))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum))
+    app.add_handler(CallbackQueryHandler(confirm_clear_lessons, pattern=r"^clear_lessons:confirm$"))
+    app.add_handler(CallbackQueryHandler(confirm_clear_reports, pattern=r"^clear_reports:confirm$"))
+    app.add_handler(CallbackQueryHandler(pick_clear_school_sum, pattern=r"^clear_school_select:\d+$"))
+    app.add_handler(CallbackQueryHandler(confirm_clear_school_sum, pattern=r"^clear_school_confirm:\d+$"))
+    app.add_handler(CallbackQueryHandler(cancel_clear_action, pattern=r"^clear_action:cancel$"))
     app.add_handler(CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back))
     app.add_handler(MessageHandler(filters.COMMAND, reject_command))

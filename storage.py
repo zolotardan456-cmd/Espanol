@@ -342,7 +342,7 @@ class Storage:
             with self._connect() as conn:
                 return conn.execute(
                     """
-                    SELECT id, school, student_name, lesson_dt, lesson_end_dt
+                    SELECT id, school, student_name, lesson_dt, lesson_end_dt, is_confirmed
                     FROM lessons
                     WHERE id = ?
                     """,
@@ -608,3 +608,39 @@ class Storage:
                     conn.execute("DELETE FROM lesson_reports WHERE chat_id = ?", (chat_id,))
                     conn.execute("DELETE FROM pending_report_notifications WHERE chat_id = ?", (chat_id,))
                 conn.commit()
+
+    def delete_all_lessons(self, chat_id: Optional[int] = None) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                if chat_id is None:
+                    conn.execute("DELETE FROM lessons")
+                    conn.execute("DELETE FROM pending_report_notifications")
+                else:
+                    conn.execute("DELETE FROM lessons WHERE chat_id = ?", (chat_id,))
+                    conn.execute("DELETE FROM pending_report_notifications WHERE chat_id = ?", (chat_id,))
+                conn.commit()
+
+    def delete_all_reports(self, chat_id: Optional[int] = None) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                if chat_id is None:
+                    conn.execute("DELETE FROM lesson_reports")
+                else:
+                    conn.execute("DELETE FROM lesson_reports WHERE chat_id = ?", (chat_id,))
+                conn.commit()
+
+    def delete_reports_for_school(self, school: str, chat_id: Optional[int] = None) -> int:
+        with self._lock:
+            with self._connect() as conn:
+                if chat_id is None:
+                    cur = conn.execute(
+                        "DELETE FROM lesson_reports WHERE school = ?",
+                        (school,),
+                    )
+                else:
+                    cur = conn.execute(
+                        "DELETE FROM lesson_reports WHERE chat_id = ? AND school = ?",
+                        (chat_id, school),
+                    )
+                conn.commit()
+                return int(cur.rowcount or 0)
