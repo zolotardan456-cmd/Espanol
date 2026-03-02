@@ -44,6 +44,7 @@ BTN_CLEAR_REPORTS = "Очистить все отчеты"
 BTN_CLEAR_SCHOOL_SUM = "Очистить сумму школы"
 BTN_EDIT = "Редактировать запись"
 BTN_DELETE_ONE = "Удалить запись"
+BTN_DELETE_STUDENT = "Удалить ученика"
 BTN_BACK = "Назад"
 WEEKDAYS_RU = [
     "Понедельник",
@@ -71,6 +72,7 @@ SCHOOLS = [
     LESSON_END_MINUTE,
     EDIT_SELECT,
     DELETE_SELECT,
+    DELETE_STUDENT_SELECT,
     REPORT_NAME,
     REPORT_SCHOOL,
     REPORT_LESSON_DATE,
@@ -83,7 +85,7 @@ SCHOOLS = [
     BULK_MINUTE,
     BULK_END_HOUR,
     BULK_END_MINUTE,
-) = range(21)
+) = range(22)
 
 
 def resolve_db_path() -> str:
@@ -142,8 +144,8 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             [BTN_LESSON, BTN_LESSON_MONTH],
             [BTN_REPORT, BTN_ALL],
             [BTN_EDIT, BTN_DELETE_ONE],
-            [BTN_CLEAR_LESSONS, BTN_CLEAR_REPORTS],
-            [BTN_CLEAR_SCHOOL_SUM],
+            [BTN_DELETE_STUDENT, BTN_CLEAR_LESSONS],
+            [BTN_CLEAR_REPORTS, BTN_CLEAR_SCHOOL_SUM],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -243,6 +245,20 @@ def lesson_delete_keyboard(lessons: list) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     f"🗑 {row['student_name']} {start_dt.strftime('%d.%m %H:%M')}",
                     callback_data=f"delete_lesson:{lesson_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows) if rows else InlineKeyboardMarkup([])
+
+
+def student_delete_keyboard(student_names: List[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for idx, name in enumerate(student_names[:60]):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🗑 {name}",
+                    callback_data=f"delete_student_idx:{idx}",
                 )
             ]
         )
@@ -796,6 +812,33 @@ async def start_delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return DELETE_SELECT
 
 
+async def start_delete_student_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query:
+        await update.callback_query.answer()
+    register_chat_from_update(update)
+    target_message = update.effective_message
+    if not target_message:
+        return ConversationHandler.END
+
+    lessons = storage.list_all_lessons_for_view()
+    if not lessons:
+        await target_message.reply_text("Нет записей для удаления.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    student_names = sorted({str(row["student_name"]).strip() for row in lessons if str(row["student_name"]).strip()})
+    if not student_names:
+        await target_message.reply_text("Нет учеников для удаления.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    context.user_data["delete_student_candidates"] = student_names
+    await target_message.reply_text(
+        "Выберите ученика. Будут удалены все его записи на уроки:",
+        reply_markup=student_delete_keyboard(student_names),
+    )
+    await target_message.reply_text("Нажмите «Назад», чтобы выйти.", reply_markup=form_keyboard())
+    return DELETE_STUDENT_SELECT
+
+
 async def back_from_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -865,6 +908,63 @@ async def pick_delete_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await broadcast_to_registered(
         context,
         deleted_text,
+        fallback_chat_id=actor_chat_id,
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
+        exclude_chat_id=actor_chat_id,
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def pick_delete_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        await query.message.reply_text("Ошибка выбора. Попробуйте снова.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    idx = int(parts[1])
+    candidates = context.user_data.get("delete_student_candidates")
+    if not isinstance(candidates, list) or idx < 0 or idx >= len(candidates):
+        await query.message.reply_text("Список устарел. Откройте удаление ученика заново.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    student_name = str(candidates[idx])
+    lessons = [row for row in storage.list_all_lessons_for_view() if str(row["student_name"]) == student_name]
+    if not lessons:
+        await query.message.reply_text("Записи этого ученика не найдены.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    deleted_count = 0
+    for row in lessons:
+        lesson_id = int(row["id"])
+        pending_notifications = storage.consume_open_pending_report_notifications_for_lesson(lesson_id)
+        for notification in pending_notifications:
+            try:
+                await context.bot.delete_message(
+                    chat_id=int(notification["chat_id"]),
+                    message_id=int(notification["message_id"]),
+                )
+            except Exception:
+                pass
+        storage.delete_lesson_by_id(lesson_id)
+        deleted_count += 1
+
+    text = f"Удалены все записи ученика: <b>{escape(student_name)}</b>\nКоличество удаленных уроков: {deleted_count}"
+    try:
+        await query.edit_message_text(text, parse_mode="HTML")
+    except Exception:
+        pass
+    await query.message.reply_text("Готово.", reply_markup=main_keyboard())
+
+    chat = update.effective_chat
+    actor_chat_id = int(chat.id) if chat else None
+    await broadcast_to_registered(
+        context,
+        text,
         fallback_chat_id=actor_chat_id,
         parse_mode="HTML",
         reply_markup=main_keyboard(),
@@ -1937,6 +2037,7 @@ def build_app(token: str) -> Application:
             MessageHandler(filters.Regex(f"^{BTN_LESSON}$"), start_lesson),
             MessageHandler(filters.Regex(f"^{BTN_EDIT}$"), start_edit_menu),
             MessageHandler(filters.Regex(f"^{BTN_DELETE_ONE}$"), start_delete_menu),
+            MessageHandler(filters.Regex(f"^{BTN_DELETE_STUDENT}$"), start_delete_student_menu),
         ],
         states={
             LESSON_SCHOOL: [
@@ -1969,6 +2070,9 @@ def build_app(token: str) -> Application:
             ],
             DELETE_SELECT: [
                 CallbackQueryHandler(pick_delete_lesson, pattern=r"^delete_lesson:\d+$"),
+            ],
+            DELETE_STUDENT_SELECT: [
+                CallbackQueryHandler(pick_delete_student, pattern=r"^delete_student_idx:\d+$"),
             ],
         },
         fallbacks=[
