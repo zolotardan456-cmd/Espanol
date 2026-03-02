@@ -5,7 +5,7 @@ import re
 from html import escape
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Set
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 APP_TZ_FALLBACK = "Europe/Kyiv"
 
 BTN_LESSON = "Записать на урок"
+BTN_LESSON_MONTH = "Записать на месяц"
 BTN_REPORT = "Отчет о уроке"
 BTN_ALL = "Все записи"
 BTN_CLEAR_LESSONS = "Очистить все записи"
@@ -53,6 +54,7 @@ WEEKDAYS_RU = [
     "Суббота",
     "Воскресенье",
 ]
+WEEKDAY_SHORT_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 SCHOOLS = [
     "Yarko",
     "Uknow",
@@ -71,8 +73,17 @@ SCHOOLS = [
     DELETE_SELECT,
     REPORT_NAME,
     REPORT_SCHOOL,
+    REPORT_LESSON_DATE,
     REPORT_PAYMENT,
-) = range(12)
+    BULK_SCHOOL,
+    BULK_STUDENT,
+    BULK_MONTH,
+    BULK_WEEKDAYS,
+    BULK_HOUR,
+    BULK_MINUTE,
+    BULK_END_HOUR,
+    BULK_END_MINUTE,
+) = range(21)
 
 
 def resolve_db_path() -> str:
@@ -128,10 +139,11 @@ def local_now() -> datetime:
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [BTN_LESSON, BTN_REPORT],
-            [BTN_ALL, BTN_EDIT],
-            [BTN_DELETE_ONE, BTN_CLEAR_LESSONS],
-            [BTN_CLEAR_REPORTS, BTN_CLEAR_SCHOOL_SUM],
+            [BTN_LESSON, BTN_LESSON_MONTH],
+            [BTN_REPORT, BTN_ALL],
+            [BTN_EDIT, BTN_DELETE_ONE],
+            [BTN_CLEAR_LESSONS, BTN_CLEAR_REPORTS],
+            [BTN_CLEAR_SCHOOL_SUM],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -343,9 +355,13 @@ async def show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if reports:
         lines = ["\nОтчеты:"]
         for row in reports:
-            created_at = datetime.fromisoformat(str(row["created_at"])).strftime("%d.%m.%Y %H:%M")
+            lesson_dt_raw = row["lesson_dt"] if "lesson_dt" in row.keys() else None
+            if lesson_dt_raw:
+                report_date = datetime.fromisoformat(str(lesson_dt_raw)).strftime("%d.%m.%Y")
+            else:
+                report_date = datetime.fromisoformat(str(row["created_at"])).strftime("%d.%m.%Y")
             lines.append(
-                f"- {created_at} | {row['full_name']} | {row['school']} | оплата: {format_uah(float(row['payment_uah']))}"
+                f"- {report_date} | {row['full_name']} | {row['school']} | оплата: {format_uah(float(row['payment_uah']))}"
             )
         lines.append("\nСумма по школам:")
         for school in SCHOOLS:
@@ -373,6 +389,285 @@ async def need_school_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=school_keyboard("school"),
     )
     return LESSON_SCHOOL
+
+
+async def start_bulk_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    register_chat_from_update(update)
+    context.user_data.pop("bulk_selected_days", None)
+    await update.message.reply_text(
+        "Запись на месяц.\nВыберите школу:",
+        reply_markup=school_keyboard("bulk_school"),
+    )
+    await update.message.reply_text("Нажмите «Назад», чтобы выйти из заполнения.", reply_markup=form_keyboard())
+    return BULK_SCHOOL
+
+
+async def bulk_lesson_school(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[1])
+    context.user_data["bulk_school"] = SCHOOLS[idx]
+    await query.message.reply_text("Введите имя ученика:", reply_markup=form_keyboard())
+    return BULK_STUDENT
+
+
+async def bulk_lesson_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["bulk_student"] = update.message.text.strip()
+    now = local_now()
+    context.user_data["bulk_year"] = now.year
+    context.user_data["bulk_month"] = now.month
+    context.user_data["bulk_selected_days"] = set()
+    await update.message.reply_text(
+        "Выберите месяц для записи:",
+        reply_markup=bulk_month_keyboard(now.year, now.month),
+    )
+    return BULK_MONTH
+
+
+async def bulk_cancel_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    try:
+        await query.edit_message_text("Возврат в главное меню.")
+    except Exception:
+        pass
+    await query.message.reply_text("Выберите действие:", reply_markup=main_keyboard())
+    return ConversationHandler.END
+
+
+async def bulk_lesson_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) < 2:
+        return BULK_MONTH
+    action = parts[1]
+
+    if action == "cancel":
+        return await bulk_cancel_inline(update, context)
+
+    if action in ("prev", "next"):
+        year = int(parts[2])
+        month = int(parts[3])
+        if action == "prev":
+            month -= 1
+            if month == 0:
+                month = 12
+                year -= 1
+        else:
+            month += 1
+            if month == 13:
+                month = 1
+                year += 1
+        context.user_data["bulk_year"] = year
+        context.user_data["bulk_month"] = month
+        await query.edit_message_reply_markup(reply_markup=bulk_month_keyboard(year, month))
+        return BULK_MONTH
+
+    if action == "select":
+        year = int(parts[2])
+        month = int(parts[3])
+        context.user_data["bulk_year"] = year
+        context.user_data["bulk_month"] = month
+        selected_days = context.user_data.get("bulk_selected_days", set())
+        await query.edit_message_text(
+            f"Месяц: {calendar.month_name[month]} {year}\nВыберите дни недели:",
+            reply_markup=bulk_weekdays_keyboard(selected_days),
+        )
+        return BULK_WEEKDAYS
+
+    return BULK_MONTH
+
+
+async def bulk_lesson_weekdays(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) < 2:
+        return BULK_WEEKDAYS
+    action = parts[1]
+
+    if action == "cancel":
+        return await bulk_cancel_inline(update, context)
+
+    selected_days = context.user_data.get("bulk_selected_days", set())
+
+    if action == "toggle":
+        day_idx = int(parts[2])
+        if day_idx in selected_days:
+            selected_days.remove(day_idx)
+        else:
+            selected_days.add(day_idx)
+        context.user_data["bulk_selected_days"] = selected_days
+        day_names = ", ".join(WEEKDAY_SHORT_RU[d] for d in sorted(selected_days)) if selected_days else "не выбраны"
+        await query.edit_message_text(
+            f"Выберите дни недели:\nСейчас: {day_names}",
+            reply_markup=bulk_weekdays_keyboard(selected_days),
+        )
+        return BULK_WEEKDAYS
+
+    if action == "done":
+        if not selected_days:
+            await query.answer("Выберите хотя бы один день недели", show_alert=True)
+            return BULK_WEEKDAYS
+        day_names = ", ".join(WEEKDAY_SHORT_RU[d] for d in sorted(selected_days))
+        await query.edit_message_text(
+            f"Дни: {day_names}\nВыберите час начала:",
+            reply_markup=bulk_hour_keyboard(),
+        )
+        return BULK_HOUR
+
+    return BULK_WEEKDAYS
+
+
+async def bulk_lesson_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    hour = int(query.data.split(":")[1])
+    context.user_data["bulk_start_hour"] = hour
+    await query.edit_message_text(
+        f"Час начала: {hour:02d}\nВыберите минуты:",
+        reply_markup=bulk_minute_keyboard(),
+    )
+    return BULK_MINUTE
+
+
+async def bulk_lesson_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    minute_raw = query.data.split(":")[1]
+    if minute_raw == "back":
+        await query.edit_message_text(
+            "Выберите час начала:",
+            reply_markup=bulk_hour_keyboard(),
+        )
+        return BULK_HOUR
+
+    context.user_data["bulk_start_minute"] = int(minute_raw)
+    start_hour = int(context.user_data.get("bulk_start_hour", 0))
+    await query.edit_message_text(
+        f"Начало: {start_hour:02d}:{int(minute_raw):02d}\nВыберите час окончания:",
+        reply_markup=bulk_hour_keyboard(),
+    )
+    return BULK_END_HOUR
+
+
+async def bulk_lesson_end_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    hour = int(query.data.split(":")[1])
+    context.user_data["bulk_end_hour"] = hour
+    start_hour = int(context.user_data.get("bulk_start_hour", 0))
+    start_minute = int(context.user_data.get("bulk_start_minute", 0))
+    await query.edit_message_text(
+        f"Начало: {start_hour:02d}:{start_minute:02d}\nОкончание, час: {hour:02d}\nВыберите минуты окончания:",
+        reply_markup=bulk_minute_keyboard(),
+    )
+    return BULK_END_MINUTE
+
+
+async def bulk_lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    minute_raw = query.data.split(":")[1]
+    if minute_raw == "back":
+        start_hour = int(context.user_data.get("bulk_start_hour", 0))
+        start_minute = int(context.user_data.get("bulk_start_minute", 0))
+        await query.edit_message_text(
+            f"Начало: {start_hour:02d}:{start_minute:02d}\nВыберите час окончания:",
+            reply_markup=bulk_hour_keyboard(),
+        )
+        return BULK_END_HOUR
+
+    start_hour = int(context.user_data.get("bulk_start_hour", 0))
+    start_minute = int(context.user_data.get("bulk_start_minute", 0))
+    end_hour = int(context.user_data.get("bulk_end_hour", 0))
+    end_minute = int(minute_raw)
+
+    start_time = dt_time(hour=start_hour, minute=start_minute)
+    end_time = dt_time(hour=end_hour, minute=end_minute)
+    if end_time <= start_time:
+        await query.edit_message_text(
+            "Окончание должно быть позже начала.\nВыберите час окончания:",
+            reply_markup=bulk_hour_keyboard(),
+        )
+        return BULK_END_HOUR
+
+    school = str(context.user_data.get("bulk_school", "")).strip()
+    student = str(context.user_data.get("bulk_student", "")).strip()
+    year = int(context.user_data.get("bulk_year", 0))
+    month = int(context.user_data.get("bulk_month", 0))
+    selected_days = set(context.user_data.get("bulk_selected_days", set()))
+    if not school or not student or not year or not month or not selected_days:
+        await query.message.reply_text("Не хватает данных. Начните заново.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    now = local_now()
+    chat_id = update.effective_chat.id
+    days_in_month = calendar.monthrange(year, month)[1]
+    created = 0
+    skipped_past = 0
+    for day in range(1, days_in_month + 1):
+        lesson_date = datetime(year, month, day).date()
+        if lesson_date.weekday() not in selected_days:
+            continue
+        lesson_start_dt = datetime.combine(lesson_date, start_time)
+        lesson_end_dt = datetime.combine(lesson_date, end_time)
+        if lesson_start_dt <= now:
+            skipped_past += 1
+            continue
+
+        start_reminder_dt = lesson_start_dt - timedelta(minutes=30)
+        if start_reminder_dt < now:
+            start_reminder_dt = now
+        end_reminder_dt = lesson_end_dt - timedelta(minutes=15)
+        if end_reminder_dt < now:
+            end_reminder_dt = now
+
+        storage.add_lesson(
+            chat_id=chat_id,
+            school=school,
+            student_name=student,
+            lesson_start_dt=lesson_start_dt,
+            reminder_start_dt=start_reminder_dt,
+            lesson_end_dt=lesson_end_dt,
+            reminder_end_dt=end_reminder_dt,
+        )
+        created += 1
+
+    month_name = calendar.month_name[month]
+    day_names = ", ".join(WEEKDAY_SHORT_RU[d] for d in sorted(selected_days))
+    await query.edit_message_text(
+        f"Готово.\n"
+        f"Ученик: {escape(student)}\n"
+        f"Школа: <b>{escape(school)}</b>\n"
+        f"Месяц: {month_name} {year}\n"
+        f"Дни: {day_names}\n"
+        f"Время: {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}\n"
+        f"Создано уроков: {created}\n"
+        f"Пропущено прошедших дат: {skipped_past}",
+        parse_mode="HTML",
+    )
+    await query.message.reply_text("Возврат в главное меню.", reply_markup=main_keyboard())
+    await broadcast_to_registered(
+        context,
+        (
+            "Добавлены уроки на месяц.\n"
+            f"Ученик: {escape(student)}\n"
+            f"Школа: <b>{escape(school)}</b>\n"
+            f"Месяц: {month_name} {year}\n"
+            f"Дни: {day_names}\n"
+            f"Время: {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}\n"
+            f"Создано: {created}"
+        ),
+        fallback_chat_id=chat_id,
+        parse_mode="HTML",
+        exclude_chat_id=chat_id,
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def start_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -534,6 +829,41 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def report_calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    cal = calendar.monthcalendar(year, month)
+    month_name = f"{calendar.month_name[month]} {year}"
+    rows = [
+        [
+            InlineKeyboardButton("◀", callback_data=f"repcal:prev:{year}:{month}"),
+            InlineKeyboardButton(month_name, callback_data="repcal:noop"),
+            InlineKeyboardButton("▶", callback_data=f"repcal:next:{year}:{month}"),
+        ],
+        [
+            InlineKeyboardButton("Пн", callback_data="repcal:noop"),
+            InlineKeyboardButton("Вт", callback_data="repcal:noop"),
+            InlineKeyboardButton("Ср", callback_data="repcal:noop"),
+            InlineKeyboardButton("Чт", callback_data="repcal:noop"),
+            InlineKeyboardButton("Пт", callback_data="repcal:noop"),
+            InlineKeyboardButton("Сб", callback_data="repcal:noop"),
+            InlineKeyboardButton("Вс", callback_data="repcal:noop"),
+        ],
+    ]
+    for week in cal:
+        week_row = []
+        for day in week:
+            if day == 0:
+                week_row.append(InlineKeyboardButton("·", callback_data="repcal:noop"))
+            else:
+                week_row.append(
+                    InlineKeyboardButton(
+                        str(day),
+                        callback_data=f"repcal:day:{year}:{month}:{day}",
+                    )
+                )
+        rows.append(week_row)
+    return InlineKeyboardMarkup(rows)
+
+
 def hour_keyboard() -> InlineKeyboardMarkup:
     rows = []
     row = []
@@ -558,6 +888,61 @@ def minute_keyboard() -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("Назад к часам", callback_data="timem:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def bulk_month_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    month_name = f"{calendar.month_name[month]} {year}"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("◀", callback_data=f"bulk_month:prev:{year}:{month}"),
+                InlineKeyboardButton(month_name, callback_data=f"bulk_month:select:{year}:{month}"),
+                InlineKeyboardButton("▶", callback_data=f"bulk_month:next:{year}:{month}"),
+            ],
+            [InlineKeyboardButton("Назад", callback_data="bulk_month:cancel")],
+        ]
+    )
+
+
+def bulk_weekdays_keyboard(selected_days: Set[int]) -> InlineKeyboardMarkup:
+    row = []
+    for day_idx, short_name in enumerate(WEEKDAY_SHORT_RU):
+        prefix = "✅ " if day_idx in selected_days else ""
+        row.append(InlineKeyboardButton(f"{prefix}{short_name}", callback_data=f"bulk_wd:toggle:{day_idx}"))
+    return InlineKeyboardMarkup(
+        [
+            row,
+            [InlineKeyboardButton("Готово", callback_data="bulk_wd:done")],
+            [InlineKeyboardButton("Назад", callback_data="bulk_wd:cancel")],
+        ]
+    )
+
+
+def bulk_hour_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for hour in range(24):
+        row.append(InlineKeyboardButton(f"{hour:02d}", callback_data=f"bulk_timeh:{hour}"))
+        if len(row) == 6:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+def bulk_minute_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for minute in range(0, 60, 5):
+        row.append(InlineKeyboardButton(f"{minute:02d}", callback_data=f"bulk_timem:{minute}"))
+        if len(row) == 6:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Назад к часам", callback_data="bulk_timem:back")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -829,6 +1214,7 @@ async def need_end_minute_button(update: Update, context: ContextTypes.DEFAULT_T
 async def start_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
     context.user_data.pop("report_lesson_id", None)
+    context.user_data.pop("report_lesson_dt", None)
     await update.message.reply_text(
         "Введите Имя Фамилию ученика:",
         reply_markup=form_keyboard(),
@@ -840,6 +1226,7 @@ async def start_report_from_button(update: Update, context: ContextTypes.DEFAULT
     register_chat_from_update(update)
     query = update.callback_query
     await query.answer()
+    context.user_data.pop("report_lesson_dt", None)
     lesson_id = None
     parts = query.data.split(":")
     if len(parts) == 2 and parts[1].isdigit():
@@ -875,16 +1262,80 @@ async def report_school(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     idx = int(query.data.split(":")[1])
     context.user_data["report_school"] = SCHOOLS[idx]
     await query.edit_message_text(f"Школа выбрана: <b>{escape(SCHOOLS[idx])}</b>", parse_mode="HTML")
+
+    report_lesson_id = context.user_data.get("report_lesson_id")
+    if report_lesson_id:
+        report_lesson = storage.get_lesson_by_id(int(report_lesson_id))
+        if report_lesson and report_lesson["lesson_dt"]:
+            context.user_data["report_lesson_dt"] = str(report_lesson["lesson_dt"])
+        await query.message.reply_text(
+            "Введите оплату в гривнах.\nПримеры: 500 или 2*350",
+            reply_markup=form_keyboard(),
+        )
+        return REPORT_PAYMENT
+
+    now = local_now()
+    context.user_data["report_calendar_year"] = now.year
+    context.user_data["report_calendar_month"] = now.month
     await query.message.reply_text(
-        "Введите оплату в гривнах.\nПримеры: 500 или 2*350",
-        reply_markup=form_keyboard(),
+        "Выберите дату проведенного урока:",
+        reply_markup=report_calendar_keyboard(now.year, now.month),
     )
-    return REPORT_PAYMENT
+    return REPORT_LESSON_DATE
 
 
 async def need_report_school_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Выберите школу кнопкой ниже:", reply_markup=school_keyboard("report_school"))
     return REPORT_SCHOOL
+
+
+async def report_lesson_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "repcal:noop":
+        return REPORT_LESSON_DATE
+
+    parts = data.split(":")
+    action = parts[1]
+
+    if action in ("prev", "next"):
+        year = int(parts[2])
+        month = int(parts[3])
+        if action == "prev":
+            month -= 1
+            if month == 0:
+                month = 12
+                year -= 1
+        else:
+            month += 1
+            if month == 13:
+                month = 1
+                year += 1
+        context.user_data["report_calendar_year"] = year
+        context.user_data["report_calendar_month"] = month
+        await query.edit_message_reply_markup(reply_markup=report_calendar_keyboard(year, month))
+        return REPORT_LESSON_DATE
+
+    if action == "day":
+        year = int(parts[2])
+        month = int(parts[3])
+        day = int(parts[4])
+        selected_date = datetime(year, month, day).date()
+        context.user_data["report_lesson_dt"] = datetime.combine(selected_date, dt_time(hour=0, minute=0)).isoformat(
+            timespec="seconds"
+        )
+        await query.edit_message_text(
+            f"Дата урока: {selected_date.strftime('%d.%m.%Y')}",
+        )
+        await query.message.reply_text(
+            "Введите оплату в гривнах.\nПримеры: 500 или 2*350",
+            reply_markup=form_keyboard(),
+        )
+        return REPORT_PAYMENT
+
+    return REPORT_LESSON_DATE
 
 
 async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -899,8 +1350,26 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     school = context.user_data.get("report_school", "")
     chat_id = update.effective_chat.id
 
-    storage.add_lesson_report(chat_id, full_name, school, payment, payment_uah)
     report_lesson_id = context.user_data.get("report_lesson_id")
+    lesson_dt_for_report = None
+    if report_lesson_id:
+        report_lesson = storage.get_lesson_by_id(int(report_lesson_id))
+        if report_lesson and report_lesson["lesson_dt"]:
+            lesson_dt_for_report = datetime.fromisoformat(str(report_lesson["lesson_dt"]))
+    else:
+        lesson_dt_raw = context.user_data.get("report_lesson_dt")
+        if lesson_dt_raw:
+            lesson_dt_for_report = datetime.fromisoformat(str(lesson_dt_raw))
+
+    storage.add_lesson_report(
+        chat_id=chat_id,
+        full_name=full_name,
+        school=school,
+        lesson_dt=lesson_dt_for_report,
+        payment=payment,
+        payment_uah=payment_uah,
+    )
+
     if report_lesson_id:
         pending_notifications = storage.consume_open_pending_report_notifications_for_lesson(int(report_lesson_id))
     else:
@@ -915,11 +1384,15 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             pass
     total_uah = storage.total_payment_uah(chat_id=None)
+    lesson_date_line = ""
+    if lesson_dt_for_report:
+        lesson_date_line = f"Дата урока: {lesson_dt_for_report.strftime('%d.%m.%Y')}\n"
 
     await update.message.reply_text(
         "Отчет сохранен:\n"
         f"Имя Фамилия: {full_name}\n"
         f"Школа: <b>{escape(school)}</b>\n"
+        f"{lesson_date_line}"
         f"Оплата: {payment}\n"
         f"Общая сумма оплат: {format_uah(total_uah)}",
         reply_markup=main_keyboard(),
@@ -931,6 +1404,7 @@ async def report_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Сохранен новый отчет:\n"
             f"Имя Фамилия: {escape(full_name)}\n"
             f"Школа: <b>{escape(school)}</b>\n"
+            f"{lesson_date_line}"
             f"Оплата: {payment}\n"
             f"Общая сумма оплат: {format_uah(total_uah)}"
         ),
@@ -1418,6 +1892,48 @@ def build_app(token: str) -> Application:
         ],
     )
 
+    bulk_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(f"^{BTN_LESSON_MONTH}$"), start_bulk_lesson),
+        ],
+        states={
+            BULK_SCHOOL: [
+                CallbackQueryHandler(bulk_lesson_school, pattern=r"^bulk_school:\d+$"),
+            ],
+            BULK_STUDENT: [
+                MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_lesson_student),
+            ],
+            BULK_MONTH: [
+                CallbackQueryHandler(bulk_lesson_month, pattern=r"^bulk_month:(prev|next|select):\d+:\d+$"),
+                CallbackQueryHandler(bulk_lesson_month, pattern=r"^bulk_month:cancel$"),
+            ],
+            BULK_WEEKDAYS: [
+                CallbackQueryHandler(bulk_lesson_weekdays, pattern=r"^bulk_wd:toggle:\d+$"),
+                CallbackQueryHandler(bulk_lesson_weekdays, pattern=r"^bulk_wd:done$"),
+                CallbackQueryHandler(bulk_lesson_weekdays, pattern=r"^bulk_wd:cancel$"),
+            ],
+            BULK_HOUR: [
+                CallbackQueryHandler(bulk_lesson_hour, pattern=r"^bulk_timeh:\d+$"),
+            ],
+            BULK_MINUTE: [
+                CallbackQueryHandler(bulk_lesson_minute, pattern=r"^bulk_timem:(\d+|back)$"),
+            ],
+            BULK_END_HOUR: [
+                CallbackQueryHandler(bulk_lesson_end_hour, pattern=r"^bulk_timeh:\d+$"),
+            ],
+            BULK_END_MINUTE: [
+                CallbackQueryHandler(bulk_lesson_end_minute, pattern=r"^bulk_timem:(\d+|back)$"),
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
+            MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
+        ],
+    )
+
     report_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex(f"^{BTN_REPORT}$"), start_report),
@@ -1430,6 +1946,9 @@ def build_app(token: str) -> Application:
             ],
             REPORT_SCHOOL: [
                 CallbackQueryHandler(report_school, pattern=r"^report_school:\d+$"),
+            ],
+            REPORT_LESSON_DATE: [
+                CallbackQueryHandler(report_lesson_date, pattern=r"^repcal:"),
             ],
             REPORT_PAYMENT: [
                 MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
@@ -1448,6 +1967,7 @@ def build_app(token: str) -> Application:
     app.add_handler(CommandHandler("debug_reminders", debug_reminders))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ALL}$"), show_all))
     app.add_handler(lesson_conv)
+    app.add_handler(bulk_conv)
     app.add_handler(report_conv)
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation))

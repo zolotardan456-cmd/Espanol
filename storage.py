@@ -88,6 +88,7 @@ class Storage:
                         chat_id INTEGER NOT NULL,
                         full_name TEXT NOT NULL,
                         school TEXT NOT NULL,
+                        lesson_dt TEXT,
                         payment TEXT NOT NULL,
                         payment_uah REAL NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL
@@ -117,6 +118,8 @@ class Storage:
                 )
                 columns = conn.execute("PRAGMA table_info(lesson_reports)").fetchall()
                 column_names = {str(row["name"]) for row in columns}
+                if "lesson_dt" not in column_names:
+                    conn.execute("ALTER TABLE lesson_reports ADD COLUMN lesson_dt TEXT")
                 if "payment_uah" not in column_names:
                     conn.execute(
                         "ALTER TABLE lesson_reports ADD COLUMN payment_uah REAL NOT NULL DEFAULT 0"
@@ -321,18 +324,20 @@ class Storage:
         chat_id: int,
         full_name: str,
         school: str,
+        lesson_dt: Optional[datetime],
         payment: str,
         payment_uah: float,
     ) -> int:
         created_at = datetime.now().isoformat(timespec="seconds")
+        lesson_dt_value = lesson_dt.isoformat(timespec="seconds") if lesson_dt else None
         with self._lock:
             with self._connect() as conn:
                 cur = conn.execute(
                     """
-                    INSERT INTO lesson_reports (chat_id, full_name, school, payment, payment_uah, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO lesson_reports (chat_id, full_name, school, lesson_dt, payment, payment_uah, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (chat_id, full_name, school, payment, payment_uah, created_at),
+                    (chat_id, full_name, school, lesson_dt_value, payment, payment_uah, created_at),
                 )
                 conn.commit()
                 return int(cur.lastrowid)
@@ -429,19 +434,19 @@ class Storage:
                 if chat_id is None:
                     return conn.execute(
                         """
-                        SELECT full_name, school, payment, payment_uah, created_at
+                        SELECT full_name, school, lesson_dt, payment, payment_uah, created_at
                         FROM lesson_reports
-                        ORDER BY created_at ASC
+                        ORDER BY COALESCE(lesson_dt, created_at) ASC
                         LIMIT ?
                         """,
                         (limit,),
                     ).fetchall()
                 return conn.execute(
                     """
-                    SELECT full_name, school, payment, payment_uah, created_at
+                    SELECT full_name, school, lesson_dt, payment, payment_uah, created_at
                     FROM lesson_reports
                     WHERE chat_id = ?
-                    ORDER BY created_at ASC
+                    ORDER BY COALESCE(lesson_dt, created_at) ASC
                     LIMIT ?
                     """,
                     (chat_id, limit),
