@@ -391,11 +391,28 @@ async def need_school_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return LESSON_SCHOOL
 
 
+def get_current_bulk_weekday(context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    order = context.user_data.get("bulk_day_order")
+    if not isinstance(order, list) or not order:
+        return None
+    cursor = int(context.user_data.get("bulk_day_cursor", 0))
+    if cursor < 0 or cursor >= len(order):
+        return None
+    return int(order[cursor])
+
+
+def format_hhmm(hour: int, minute: int) -> str:
+    return f"{hour:02d}:{minute:02d}"
+
+
 async def start_bulk_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
     context.user_data.pop("bulk_selected_days", None)
+    context.user_data.pop("bulk_day_order", None)
+    context.user_data.pop("bulk_day_cursor", None)
+    context.user_data.pop("bulk_time_by_day", None)
     await update.message.reply_text(
-        "Запись на месяц.\nВыберите школу:",
+        "Запись на месяц.\nДля каждого выбранного дня недели время будет настраиваться отдельно.\nВыберите школу:",
         reply_markup=school_keyboard("bulk_school"),
     )
     await update.message.reply_text("Нажмите «Назад», чтобы выйти из заполнения.", reply_markup=form_keyboard())
@@ -511,9 +528,16 @@ async def bulk_lesson_weekdays(update: Update, context: ContextTypes.DEFAULT_TYP
         if not selected_days:
             await query.answer("Выберите хотя бы один день недели", show_alert=True)
             return BULK_WEEKDAYS
-        day_names = ", ".join(WEEKDAY_SHORT_RU[d] for d in sorted(selected_days))
+        day_order = sorted(selected_days)
+        day_names = ", ".join(WEEKDAY_SHORT_RU[d] for d in day_order)
+        context.user_data["bulk_day_order"] = day_order
+        context.user_data["bulk_day_cursor"] = 0
+        context.user_data["bulk_time_by_day"] = {}
+        first_day = day_order[0]
         await query.edit_message_text(
-            f"Дни: {day_names}\nВыберите час начала:",
+            f"Дни: {day_names}\n"
+            f"Настройте время для {WEEKDAYS_RU[first_day]}.\n"
+            "Выберите час начала:",
             reply_markup=bulk_hour_keyboard(),
         )
         return BULK_HOUR
@@ -524,10 +548,15 @@ async def bulk_lesson_weekdays(update: Update, context: ContextTypes.DEFAULT_TYP
 async def bulk_lesson_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    day_idx = get_current_bulk_weekday(context)
+    if day_idx is None:
+        await query.message.reply_text("Данные сбились. Начните запись на месяц заново.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
     hour = int(query.data.split(":")[1])
     context.user_data["bulk_start_hour"] = hour
     await query.edit_message_text(
-        f"Час начала: {hour:02d}\nВыберите минуты:",
+        f"{WEEKDAYS_RU[day_idx]}: час начала {hour:02d}\nВыберите минуты:",
         reply_markup=bulk_minute_keyboard(),
     )
     return BULK_MINUTE
@@ -536,10 +565,15 @@ async def bulk_lesson_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def bulk_lesson_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    day_idx = get_current_bulk_weekday(context)
+    if day_idx is None:
+        await query.message.reply_text("Данные сбились. Начните запись на месяц заново.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
     minute_raw = query.data.split(":")[1]
     if minute_raw == "back":
         await query.edit_message_text(
-            "Выберите час начала:",
+            f"{WEEKDAYS_RU[day_idx]}: выберите час начала:",
             reply_markup=bulk_hour_keyboard(),
         )
         return BULK_HOUR
@@ -547,7 +581,7 @@ async def bulk_lesson_minute(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["bulk_start_minute"] = int(minute_raw)
     start_hour = int(context.user_data.get("bulk_start_hour", 0))
     await query.edit_message_text(
-        f"Начало: {start_hour:02d}:{int(minute_raw):02d}\nВыберите час окончания:",
+        f"{WEEKDAYS_RU[day_idx]}: начало {start_hour:02d}:{int(minute_raw):02d}\nВыберите час окончания:",
         reply_markup=bulk_hour_keyboard(),
     )
     return BULK_END_HOUR
@@ -556,12 +590,18 @@ async def bulk_lesson_minute(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def bulk_lesson_end_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    day_idx = get_current_bulk_weekday(context)
+    if day_idx is None:
+        await query.message.reply_text("Данные сбились. Начните запись на месяц заново.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
     hour = int(query.data.split(":")[1])
     context.user_data["bulk_end_hour"] = hour
     start_hour = int(context.user_data.get("bulk_start_hour", 0))
     start_minute = int(context.user_data.get("bulk_start_minute", 0))
     await query.edit_message_text(
-        f"Начало: {start_hour:02d}:{start_minute:02d}\nОкончание, час: {hour:02d}\nВыберите минуты окончания:",
+        f"{WEEKDAYS_RU[day_idx]}: начало {start_hour:02d}:{start_minute:02d}\n"
+        f"Окончание, час: {hour:02d}\nВыберите минуты окончания:",
         reply_markup=bulk_minute_keyboard(),
     )
     return BULK_END_MINUTE
@@ -570,12 +610,17 @@ async def bulk_lesson_end_hour(update: Update, context: ContextTypes.DEFAULT_TYP
 async def bulk_lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    day_idx = get_current_bulk_weekday(context)
+    if day_idx is None:
+        await query.message.reply_text("Данные сбились. Начните запись на месяц заново.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
     minute_raw = query.data.split(":")[1]
     if minute_raw == "back":
         start_hour = int(context.user_data.get("bulk_start_hour", 0))
         start_minute = int(context.user_data.get("bulk_start_minute", 0))
         await query.edit_message_text(
-            f"Начало: {start_hour:02d}:{start_minute:02d}\nВыберите час окончания:",
+            f"{WEEKDAYS_RU[day_idx]}: начало {start_hour:02d}:{start_minute:02d}\nВыберите час окончания:",
             reply_markup=bulk_hour_keyboard(),
         )
         return BULK_END_HOUR
@@ -589,10 +634,38 @@ async def bulk_lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_T
     end_time = dt_time(hour=end_hour, minute=end_minute)
     if end_time <= start_time:
         await query.edit_message_text(
-            "Окончание должно быть позже начала.\nВыберите час окончания:",
+            f"{WEEKDAYS_RU[day_idx]}: окончание должно быть позже начала.\nВыберите час окончания:",
             reply_markup=bulk_hour_keyboard(),
         )
         return BULK_END_HOUR
+
+    time_by_day = context.user_data.get("bulk_time_by_day")
+    if not isinstance(time_by_day, dict):
+        time_by_day = {}
+    time_by_day[str(day_idx)] = {
+        "start_hour": start_hour,
+        "start_minute": start_minute,
+        "end_hour": end_hour,
+        "end_minute": end_minute,
+    }
+    context.user_data["bulk_time_by_day"] = time_by_day
+
+    day_order = context.user_data.get("bulk_day_order")
+    if not isinstance(day_order, list) or not day_order:
+        await query.message.reply_text("Данные сбились. Начните запись на месяц заново.", reply_markup=main_keyboard())
+        context.user_data.clear()
+        return ConversationHandler.END
+    cursor = int(context.user_data.get("bulk_day_cursor", 0))
+    if cursor + 1 < len(day_order):
+        next_day = int(day_order[cursor + 1])
+        context.user_data["bulk_day_cursor"] = cursor + 1
+        await query.edit_message_text(
+            f"{WEEKDAYS_RU[day_idx]}: {format_hhmm(start_hour, start_minute)} - {format_hhmm(end_hour, end_minute)} сохранено.\n"
+            f"Теперь настройте время для {WEEKDAYS_RU[next_day]}.\n"
+            "Выберите час начала:",
+            reply_markup=bulk_hour_keyboard(),
+        )
+        return BULK_HOUR
 
     school = str(context.user_data.get("bulk_school", "")).strip()
     student = str(context.user_data.get("bulk_student", "")).strip()
@@ -611,8 +684,14 @@ async def bulk_lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_T
     skipped_past = 0
     for day in range(1, days_in_month + 1):
         lesson_date = datetime(year, month, day).date()
-        if lesson_date.weekday() not in selected_days:
+        weekday_idx = lesson_date.weekday()
+        if weekday_idx not in selected_days:
             continue
+        config = time_by_day.get(str(weekday_idx))
+        if not config:
+            continue
+        start_time = dt_time(hour=int(config["start_hour"]), minute=int(config["start_minute"]))
+        end_time = dt_time(hour=int(config["end_hour"]), minute=int(config["end_minute"]))
         lesson_start_dt = datetime.combine(lesson_date, start_time)
         lesson_end_dt = datetime.combine(lesson_date, end_time)
         if lesson_start_dt <= now:
@@ -638,14 +717,23 @@ async def bulk_lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_T
         created += 1
 
     month_name = calendar.month_name[month]
-    day_names = ", ".join(WEEKDAY_SHORT_RU[d] for d in sorted(selected_days))
+    day_lines = []
+    for day_id in day_order:
+        cfg = time_by_day.get(str(day_id))
+        if not cfg:
+            continue
+        day_lines.append(
+            f"- {WEEKDAYS_RU[int(day_id)]}: "
+            f"{format_hhmm(int(cfg['start_hour']), int(cfg['start_minute']))} - "
+            f"{format_hhmm(int(cfg['end_hour']), int(cfg['end_minute']))}"
+        )
+    day_block = "\n".join(day_lines) if day_lines else "-"
     await query.edit_message_text(
         f"Готово.\n"
         f"Ученик: {escape(student)}\n"
         f"Школа: <b>{escape(school)}</b>\n"
         f"Месяц: {month_name} {year}\n"
-        f"Дни: {day_names}\n"
-        f"Время: {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}\n"
+        f"Расписание:\n{day_block}\n"
         f"Создано уроков: {created}\n"
         f"Пропущено прошедших дат: {skipped_past}",
         parse_mode="HTML",
@@ -658,8 +746,7 @@ async def bulk_lesson_end_minute(update: Update, context: ContextTypes.DEFAULT_T
             f"Ученик: {escape(student)}\n"
             f"Школа: <b>{escape(school)}</b>\n"
             f"Месяц: {month_name} {year}\n"
-            f"Дни: {day_names}\n"
-            f"Время: {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}\n"
+            f"Расписание:\n{day_block}\n"
             f"Создано: {created}"
         ),
         fallback_chat_id=chat_id,
