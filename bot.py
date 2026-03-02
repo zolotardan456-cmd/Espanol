@@ -2039,6 +2039,7 @@ def build_app(token: str) -> Application:
             MessageHandler(filters.Regex(f"^{BTN_DELETE_ONE}$"), start_delete_menu),
             MessageHandler(filters.Regex(f"^{BTN_DELETE_STUDENT}$"), start_delete_student_menu),
         ],
+        allow_reentry=True,
         states={
             LESSON_SCHOOL: [
                 CallbackQueryHandler(lesson_school, pattern=r"^school:\d+$"),
@@ -2087,6 +2088,7 @@ def build_app(token: str) -> Application:
         entry_points=[
             MessageHandler(filters.Regex(f"^{BTN_LESSON_MONTH}$"), start_bulk_lesson),
         ],
+        allow_reentry=True,
         states={
             BULK_SCHOOL: [
                 CallbackQueryHandler(bulk_lesson_school, pattern=r"^bulk_school:\d+$"),
@@ -2130,6 +2132,7 @@ def build_app(token: str) -> Application:
             MessageHandler(filters.Regex(f"^{BTN_REPORT}$"), start_report),
             CallbackQueryHandler(start_report_from_button, pattern=r"^open_report(?::\d+)?$"),
         ],
+        allow_reentry=True,
         states={
             REPORT_NAME: [
                 MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
