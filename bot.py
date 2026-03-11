@@ -166,6 +166,7 @@ def duration_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("1 час", callback_data="dur:60")],
             [InlineKeyboardButton("45 минут", callback_data="dur:45")],
+            [InlineKeyboardButton("Назад", callback_data="form:back")],
         ]
     )
 
@@ -1017,6 +1018,7 @@ def school_keyboard(prefix: str) -> InlineKeyboardMarkup:
     rows = []
     for idx, school in enumerate(SCHOOLS):
         rows.append([InlineKeyboardButton(school, callback_data=f"{prefix}:{idx}")])
+    rows.append([InlineKeyboardButton("Назад", callback_data="form:back")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1052,6 +1054,7 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
                     )
                 )
         rows.append(week_row)
+    rows.append([InlineKeyboardButton("Назад", callback_data="form:back")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1087,6 +1090,7 @@ def report_calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
                     )
                 )
         rows.append(week_row)
+    rows.append([InlineKeyboardButton("Назад", callback_data="form:back")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1100,6 +1104,7 @@ def hour_keyboard() -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
+    rows.append([InlineKeyboardButton("Назад", callback_data="form:back")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1114,6 +1119,7 @@ def minute_keyboard() -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("Назад к часам", callback_data="timem:back")])
+    rows.append([InlineKeyboardButton("Назад", callback_data="form:back")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2200,6 +2206,7 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
+            CallbackQueryHandler(back_from_inline, pattern=r"^form:back$"),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
@@ -2243,6 +2250,7 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
+            CallbackQueryHandler(back_from_inline, pattern=r"^form:back$"),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
@@ -2273,6 +2281,7 @@ def build_app(token: str) -> Application:
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
+            CallbackQueryHandler(back_from_inline, pattern=r"^form:back$"),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
