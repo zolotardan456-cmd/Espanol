@@ -64,6 +64,7 @@ SCHOOLS = [
 
 (
     LESSON_SCHOOL,
+    LESSON_DURATION,
     LESSON_STUDENT,
     LESSON_DATE,
     LESSON_HOUR,
@@ -85,7 +86,7 @@ SCHOOLS = [
     BULK_MINUTE,
     BULK_END_HOUR,
     BULK_END_MINUTE,
-) = range(22)
+) = range(23)
 
 
 def resolve_db_path() -> str:
@@ -158,6 +159,41 @@ def form_keyboard() -> ReplyKeyboardMarkup:
 
 def edit_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[BTN_DELETE_ONE, BTN_BACK]], resize_keyboard=True)
+
+
+def duration_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("1 час", callback_data="dur:60")],
+            [InlineKeyboardButton("45 минут", callback_data="dur:45")],
+        ]
+    )
+
+
+async def replace_lesson_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    reply_markup: Optional[Any] = None,
+    parse_mode: Optional[str] = None,
+) -> None:
+    chat = update.effective_chat
+    if not chat:
+        return
+    prev_id = context.user_data.get("lesson_prompt_id")
+    if prev_id:
+        try:
+            await context.bot.delete_message(chat_id=int(chat.id), message_id=int(prev_id))
+        except Exception:
+            pass
+    sent = await context.bot.send_message(
+        chat_id=int(chat.id),
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
+    context.user_data["lesson_prompt_id"] = int(sent.message_id)
 
 
 def teacher_name_from_update(update: Update) -> str:
@@ -391,16 +427,19 @@ async def show_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     register_chat_from_update(update)
     context.user_data.pop("edit_lesson_id", None)
-    await update.message.reply_text(
+    await replace_lesson_prompt(
+        update,
+        context,
         "В какой школе будет проходить урок?",
         reply_markup=school_keyboard("school"),
     )
-    await update.message.reply_text("Нажмите «Назад», чтобы выйти из заполнения.", reply_markup=form_keyboard())
     return LESSON_SCHOOL
 
 
 async def need_school_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
+    await replace_lesson_prompt(
+        update,
+        context,
         "Выберите школу кнопкой ниже:",
         reply_markup=school_keyboard("school"),
     )
@@ -1139,7 +1178,27 @@ async def lesson_school(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     idx = int(query.data.split(":")[1])
     context.user_data["lesson_school"] = SCHOOLS[idx]
 
-    await query.message.reply_text("Введите имя ученика:", reply_markup=form_keyboard())
+    await replace_lesson_prompt(
+        update,
+        context,
+        "Сколько будет идти урок?",
+        reply_markup=duration_keyboard(),
+    )
+    return LESSON_DURATION
+
+
+async def lesson_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        await query.message.reply_text("Выберите длительность кнопкой.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+    duration_min = int(parts[1])
+    if duration_min not in (45, 60):
+        duration_min = 60
+    context.user_data["lesson_duration_min"] = duration_min
+    await replace_lesson_prompt(update, context, "Введите имя ученика:", reply_markup=form_keyboard())
     return LESSON_STUDENT
 
 
@@ -1148,7 +1207,9 @@ async def lesson_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     now = local_now()
     context.user_data["calendar_year"] = now.year
     context.user_data["calendar_month"] = now.month
-    await update.message.reply_text(
+    await replace_lesson_prompt(
+        update,
+        context,
         "Выберите дату урока в календаре:",
         reply_markup=calendar_keyboard(now.year, now.month),
     )
@@ -1158,6 +1219,7 @@ async def lesson_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def lesson_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    context.user_data["lesson_prompt_id"] = int(query.message.message_id)
     data = query.data
 
     if data == "cal:noop":
@@ -1215,6 +1277,7 @@ async def need_date_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def lesson_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    context.user_data["lesson_prompt_id"] = int(query.message.message_id)
     hour = int(query.data.split(":")[1])
     context.user_data["lesson_hour"] = hour
     selected_date = datetime.strptime(context.user_data["lesson_date"], "%Y-%m-%d").date()
@@ -1233,6 +1296,7 @@ async def need_hour_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def lesson_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    context.user_data["lesson_prompt_id"] = int(query.message.message_id)
     minute_raw = query.data.split(":")[1]
     if minute_raw == "back":
         selected_date = datetime.strptime(context.user_data["lesson_date"], "%Y-%m-%d").date()
@@ -1264,11 +1328,72 @@ async def lesson_minute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return LESSON_HOUR
 
     context.user_data["lesson_start_dt"] = lesson_start_dt.isoformat(timespec="seconds")
+    duration_min = int(context.user_data.get("lesson_duration_min", 60))
+    lesson_end_dt = lesson_start_dt + timedelta(minutes=duration_min)
+
+    start_reminder_dt = lesson_start_dt - timedelta(minutes=30)
+    if start_reminder_dt < now:
+        start_reminder_dt = now
+
+    end_reminder_dt = lesson_end_dt - timedelta(minutes=15)
+    if end_reminder_dt < now:
+        end_reminder_dt = now
+
+    school = context.user_data.get("lesson_school", "")
+    student = context.user_data.get("lesson_student", "")
+    chat_id = update.effective_chat.id
+    edit_lesson_id = context.user_data.get("edit_lesson_id")
+
+    if edit_lesson_id:
+        storage.update_lesson(
+            lesson_id=int(edit_lesson_id),
+            school=school,
+            student_name=student,
+            lesson_start_dt=lesson_start_dt,
+            lesson_end_dt=lesson_end_dt,
+            reminder_start_dt=start_reminder_dt,
+            reminder_end_dt=end_reminder_dt,
+        )
+        header = "Запись обновлена."
+    else:
+        storage.add_lesson(
+            chat_id=chat_id,
+            school=school,
+            student_name=student,
+            lesson_start_dt=lesson_start_dt,
+            reminder_start_dt=start_reminder_dt,
+            lesson_end_dt=lesson_end_dt,
+            reminder_end_dt=end_reminder_dt,
+        )
+        header = "Запись сохранена."
+
     await query.edit_message_text(
-        f"Время начала: {lesson_start_dt.strftime('%H:%M')}\nВыберите час окончания:",
-        reply_markup=hour_keyboard(),
+        f"{header}\n"
+        f"Школа: <b>{escape(school)}</b>\n"
+        f"Ученик: {student}\n"
+        f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
+        f"Урок: с {lesson_start_dt.strftime('%H:%M')} до {lesson_end_dt.strftime('%H:%M')}\n\n"
+        "Напоминания:\n"
+        "- за 30 минут до начала\n"
+        "- за 15 минут до конца",
+        parse_mode="HTML",
     )
-    return LESSON_END_HOUR
+    await query.message.reply_text("Готово.", reply_markup=main_keyboard())
+    await broadcast_to_registered(
+        context,
+        (
+            f"{header}\n"
+            f"Школа: <b>{escape(school)}</b>\n"
+            f"Ученик: {escape(student)}\n"
+            f"Дата: {lesson_start_dt.strftime('%d.%m.%Y')}\n"
+            f"Урок: с {lesson_start_dt.strftime('%H:%M')} до {lesson_end_dt.strftime('%H:%M')}"
+        ),
+        fallback_chat_id=chat_id,
+        parse_mode="HTML",
+        exclude_chat_id=chat_id,
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def need_minute_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2044,6 +2169,9 @@ def build_app(token: str) -> Application:
             LESSON_SCHOOL: [
                 CallbackQueryHandler(lesson_school, pattern=r"^school:\d+$"),
             ],
+            LESSON_DURATION: [
+                CallbackQueryHandler(lesson_duration, pattern=r"^dur:\d+$"),
+            ],
             LESSON_STUDENT: [
                 MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lesson_student),
@@ -2056,12 +2184,6 @@ def build_app(token: str) -> Application:
             ],
             LESSON_MINUTE: [
                 CallbackQueryHandler(lesson_minute, pattern=r"^timem:(\d+|back)$"),
-            ],
-            LESSON_END_HOUR: [
-                CallbackQueryHandler(lesson_end_hour, pattern=r"^timeh:\d+$"),
-            ],
-            LESSON_END_MINUTE: [
-                CallbackQueryHandler(lesson_end_minute, pattern=r"^timem:(\d+|back)$"),
             ],
             EDIT_SELECT: [
                 CallbackQueryHandler(pick_edit_lesson, pattern=r"^edit_lesson:\d+$"),
