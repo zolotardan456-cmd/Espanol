@@ -2291,6 +2291,7 @@ def build_app(token: str) -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("debug_reminders", debug_reminders))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ALL}$"), show_all))
+    app.add_handler(CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"))
     app.add_handler(lesson_conv)
     app.add_handler(bulk_conv)
     app.add_handler(report_conv)
@@ -2302,7 +2303,6 @@ def build_app(token: str) -> Application:
     app.add_handler(CallbackQueryHandler(pick_clear_school_sum, pattern=r"^clear_school_select:\d+$"))
     app.add_handler(CallbackQueryHandler(confirm_clear_school_sum, pattern=r"^clear_school_confirm:\d+$"))
     app.add_handler(CallbackQueryHandler(cancel_clear_action, pattern=r"^clear_action:cancel$"))
-    app.add_handler(CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back))
     app.add_handler(MessageHandler(filters.COMMAND, reject_command))
     app.add_handler(
