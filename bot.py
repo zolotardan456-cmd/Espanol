@@ -2207,6 +2207,7 @@ def build_app(token: str) -> Application:
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
             CallbackQueryHandler(back_from_inline, pattern=r"^form:back$"),
+            CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
@@ -2251,6 +2252,7 @@ def build_app(token: str) -> Application:
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
             CallbackQueryHandler(back_from_inline, pattern=r"^form:back$"),
+            CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
@@ -2282,6 +2284,7 @@ def build_app(token: str) -> Application:
         fallbacks=[
             MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back),
             CallbackQueryHandler(back_from_inline, pattern=r"^form:back$"),
+            CallbackQueryHandler(confirm_lesson, pattern=r"^confirm_lesson:\d+$"),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_LESSONS}$"), request_clear_lessons_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_REPORTS}$"), request_clear_reports_confirmation),
             MessageHandler(filters.Regex(f"^{BTN_CLEAR_SCHOOL_SUM}$"), request_clear_school_sum),
