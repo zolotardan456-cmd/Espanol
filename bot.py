@@ -1784,11 +1784,13 @@ async def pick_clear_school_sum(update: Update, context: ContextTypes.DEFAULT_TY
     if idx < 0 or idx >= len(SCHOOLS):
         return
     school = SCHOOLS[idx]
+    context.user_data["clear_school_name"] = school
     await query.edit_message_text(
-        f"Очистить все отчеты и сумму для школы {school}?",
+        f"Какой период очистить для школы {school}?",
         reply_markup=InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Да, очистить", callback_data=f"clear_school_confirm:{idx}")],
+                [InlineKeyboardButton("1–15", callback_data="clear_school_period:first")],
+                [InlineKeyboardButton("15–конец", callback_data="clear_school_period:second")],
                 [InlineKeyboardButton("Назад", callback_data="clear_action:cancel")],
             ]
         ),
@@ -1836,24 +1838,49 @@ async def confirm_clear_school_sum(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     register_chat_from_update(update)
     parts = query.data.split(":")
-    if len(parts) != 2 or not parts[1].isdigit():
+    if len(parts) != 2 or parts[0] != "clear_school_period":
         return
-    idx = int(parts[1])
-    if idx < 0 or idx >= len(SCHOOLS):
+    period_key = parts[1]
+    school = context.user_data.get("clear_school_name")
+    if not school:
+        await query.edit_message_text("Школа не выбрана. Откройте очистку заново.")
         return
-    school = SCHOOLS[idx]
-    deleted_count = storage.delete_reports_for_school(school, chat_id=None)
+
+    now = local_now()
+    year = now.year
+    month = now.month
+    if period_key == "first":
+        start_dt = datetime(year, month, 1, 0, 0, 0)
+        end_dt = datetime(year, month, 16, 0, 0, 0)
+        period_label = "1–15"
+    else:
+        start_dt = datetime(year, month, 15, 0, 0, 0)
+        if month == 12:
+            end_dt = datetime(year + 1, 1, 1, 0, 0, 0)
+        else:
+            end_dt = datetime(year, month + 1, 1, 0, 0, 0)
+        period_label = "15–конец"
+
+    deleted_count = storage.delete_reports_for_school_period(
+        school=str(school),
+        start_dt=start_dt,
+        end_dt=end_dt,
+        chat_id=None,
+    )
     chat = update.effective_chat
     requester_chat_id = int(chat.id) if chat else None
-    await query.edit_message_text(f"Сумма по школе {school} очищена. Удалено отчетов: {deleted_count}.")
+    await query.edit_message_text(
+        f"Сумма по школе {school} очищена за период {period_label}. Удалено отчетов: {deleted_count}."
+    )
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Готово.", reply_markup=main_keyboard())
     await broadcast_to_registered(
         context,
-        f"Очищены отчеты по школе {school}. Удалено: {deleted_count}.",
+        f"Очищены отчеты по школе {school} за период {period_label}. Удалено: {deleted_count}.",
         fallback_chat_id=requester_chat_id,
         reply_markup=main_keyboard(),
         exclude_chat_id=requester_chat_id,
     )
+    context.user_data.pop("clear_school_name", None)
 
 
 async def cancel_clear_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2304,7 +2331,7 @@ def build_app(token: str) -> Application:
     app.add_handler(CallbackQueryHandler(confirm_clear_lessons, pattern=r"^clear_lessons:confirm$"))
     app.add_handler(CallbackQueryHandler(confirm_clear_reports, pattern=r"^clear_reports:confirm$"))
     app.add_handler(CallbackQueryHandler(pick_clear_school_sum, pattern=r"^clear_school_select:\d+$"))
-    app.add_handler(CallbackQueryHandler(confirm_clear_school_sum, pattern=r"^clear_school_confirm:\d+$"))
+    app.add_handler(CallbackQueryHandler(confirm_clear_school_sum, pattern=r"^clear_school_period:(first|second)$"))
     app.add_handler(CallbackQueryHandler(cancel_clear_action, pattern=r"^clear_action:cancel$"))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_BACK}$"), go_back))
     app.add_handler(MessageHandler(filters.COMMAND, reject_command))

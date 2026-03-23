@@ -649,3 +649,38 @@ class Storage:
                     )
                 conn.commit()
                 return int(cur.rowcount or 0)
+
+    def delete_reports_for_school_period(
+        self,
+        school: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        chat_id: Optional[int] = None,
+    ) -> int:
+        start_iso = start_dt.isoformat(timespec="seconds")
+        end_iso = end_dt.isoformat(timespec="seconds")
+        with self._lock:
+            with self._connect() as conn:
+                if chat_id is None:
+                    cur = conn.execute(
+                        """
+                        DELETE FROM lesson_reports
+                        WHERE school = ?
+                          AND COALESCE(lesson_dt, created_at) >= ?
+                          AND COALESCE(lesson_dt, created_at) < ?
+                        """,
+                        (school, start_iso, end_iso),
+                    )
+                else:
+                    cur = conn.execute(
+                        """
+                        DELETE FROM lesson_reports
+                        WHERE chat_id = ?
+                          AND school = ?
+                          AND COALESCE(lesson_dt, created_at) >= ?
+                          AND COALESCE(lesson_dt, created_at) < ?
+                        """,
+                        (chat_id, school, start_iso, end_iso),
+                    )
+                conn.commit()
+                return int(cur.rowcount or 0)
